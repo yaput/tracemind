@@ -129,6 +129,31 @@ static inline void tm_free(void *ptr)
  * ========================================================================== */
 
 /**
+ * Case-insensitive substring search.
+ */
+static inline const char *tm_strcasestr(const char *haystack, const char *needle)
+{
+    if (!haystack || !needle) return NULL;
+    if (!*needle) return haystack;
+    
+    size_t needle_len = strlen(needle);
+    for (; *haystack; haystack++) {
+        /* Manual case-insensitive comparison */
+        const char *h = haystack;
+        const char *n = needle;
+        size_t i = 0;
+        while (i < needle_len && *h) {
+            char hc = (*h >= 'A' && *h <= 'Z') ? (*h + 32) : *h;
+            char nc = (*n >= 'A' && *n <= 'Z') ? (*n + 32) : *n;
+            if (hc != nc) break;
+            h++; n++; i++;
+        }
+        if (i == needle_len) return haystack;
+    }
+    return NULL;
+}
+
+/**
  * String builder for efficient concatenation.
  */
 typedef struct {
@@ -164,6 +189,25 @@ static inline void tm_strbuf_append(tm_strbuf_t *sb, const char *str)
     }
     memcpy(sb->data + sb->len, str, add_len + 1);
     sb->len += add_len;
+}
+
+/**
+ * Append fixed-length data to string buffer.
+ */
+static inline void tm_strbuf_append_len(tm_strbuf_t *sb, const char *str, size_t add_len)
+{
+    if (!str || add_len == 0) return;
+    if (sb->len + add_len + 1 > sb->cap) {
+        size_t new_cap = sb->cap == 0 ? 64 : sb->cap * 2;
+        while (new_cap < sb->len + add_len + 1) {
+            new_cap *= 2;
+        }
+        sb->data = tm_realloc(sb->data, new_cap);
+        sb->cap = new_cap;
+    }
+    memcpy(sb->data + sb->len, str, add_len);
+    sb->len += add_len;
+    sb->data[sb->len] = '\0';
 }
 
 /**

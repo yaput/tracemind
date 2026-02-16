@@ -236,6 +236,16 @@ typedef enum {
 } tm_output_format_t;
 
 /**
+ * Input format for structured logs.
+ */
+typedef enum {
+    TM_INPUT_AUTO = 0,    /* Auto-detect format */
+    TM_INPUT_RAW,         /* Plain text stack trace */
+    TM_INPUT_JSON,        /* JSON lines (GCP Log Explorer export) */
+    TM_INPUT_CSV          /* CSV export */
+} tm_input_format_t;
+
+/**
  * TraceMind configuration.
  */
 typedef struct {
@@ -252,6 +262,9 @@ typedef struct {
     int max_call_depth;       /* Max call graph depth (default: 5) */
     bool include_stdlib;      /* Include stdlib in analysis */
     bool include_tests;       /* Include test files in analysis */
+    
+    /* Input Settings */
+    tm_input_format_t input_format;  /* Input format hint (auto by default) */
     
     /* Output Settings */
     tm_output_format_t output_format;

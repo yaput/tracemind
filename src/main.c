@@ -49,6 +49,7 @@ static const char *HELP_TEXT =
 "    -m, --model <name>       Model name (e.g., gpt-4o, claude-sonnet-4-20250514)\n"
 "    -k, --api-key <key>      API key (or use OPENAI_API_KEY env var)\n"
 "    -o, --output <format>    Output: cli (default), markdown, json\n"
+"    -f, --format <type>      Input format: auto (default), raw, json, csv\n"
 "    -r, --repo <path>        Repository path (auto-detected if omitted)\n"
 "    -c, --config <file>      Config file path\n"
 "    --no-color               Disable colored output\n"
@@ -68,6 +69,8 @@ static const char *HELP_TEXT =
 "    python app.py 2>&1 | tracemind analyze -\n"
 "    tracemind analyze trace.txt -o markdown > report.md\n"
 "    tracemind analyze trace.txt --provider anthropic -m claude-sonnet-4-20250514\n"
+"    tracemind analyze gcp_logs.json -f json\n"
+"    tracemind analyze exported_logs.csv -f csv\n"
 "\n"
 "For more information: https://github.com/tracemind/tracemind\n";
 
@@ -92,6 +95,7 @@ static struct option long_options[] = {
     {"model",     required_argument, 0, 'm'},
     {"api-key",   required_argument, 0, 'k'},
     {"output",    required_argument, 0, 'o'},
+    {"format",    required_argument, 0, 'f'},
     {"repo",      required_argument, 0, 'r'},
     {"config",    required_argument, 0, 'c'},
     {"no-color",  no_argument,       0, 'n'},
@@ -108,6 +112,7 @@ typedef struct {
     const char *model;
     const char *api_key;
     const char *output_format;
+    const char *input_format;
     const char *repo_path;
     const char *config_path;
     bool no_color;
@@ -123,13 +128,14 @@ static cli_args_t parse_args(int argc, char **argv)
     int opt;
     int option_index = 0;
     
-    while ((opt = getopt_long(argc, argv, "p:m:k:o:r:c:nvhV", 
+    while ((opt = getopt_long(argc, argv, "p:m:k:o:f:r:c:nvhV", 
                               long_options, &option_index)) != -1) {
         switch (opt) {
             case 'p': args.provider = optarg; break;
             case 'm': args.model = optarg; break;
             case 'k': args.api_key = optarg; break;
             case 'o': args.output_format = optarg; break;
+            case 'f': args.input_format = optarg; break;
             case 'r': args.repo_path = optarg; break;
             case 'c': args.config_path = optarg; break;
             case 'n': args.no_color = true; break;
@@ -269,6 +275,23 @@ static int cmd_analyze(cli_args_t *args)
             config->output_format = TM_OUTPUT_JSON;
         } else {
             fprintf(stderr, "Unknown output format: %s\n", args->output_format);
+            tm_config_free(config);
+            return 1;
+        }
+    }
+    
+    if (args->input_format) {
+        if (strcasecmp(args->input_format, "auto") == 0) {
+            config->input_format = TM_INPUT_AUTO;
+        } else if (strcasecmp(args->input_format, "raw") == 0) {
+            config->input_format = TM_INPUT_RAW;
+        } else if (strcasecmp(args->input_format, "json") == 0) {
+            config->input_format = TM_INPUT_JSON;
+        } else if (strcasecmp(args->input_format, "csv") == 0) {
+            config->input_format = TM_INPUT_CSV;
+        } else {
+            fprintf(stderr, "Unknown input format: %s\n", args->input_format);
+            fprintf(stderr, "Supported formats: auto, raw, json, csv\n");
             tm_config_free(config);
             return 1;
         }

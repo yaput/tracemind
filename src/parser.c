@@ -257,18 +257,18 @@ tm_error_t tm_parse_go_trace(const char *input, tm_stack_trace_t *trace)
     regex_t func_re, loc_re, panic_re;
     int ret;
     
-    /* Pattern: package.function(args) */
+    /* Pattern: package.function(args) - match function name until '(' at start of line */
     ret = regcomp(&func_re,
-                  "^([a-zA-Z0-9_./]+\\.[a-zA-Z0-9_]+)\\(",
+                  "^([^[:space:](]+)\\(",
                   REG_EXTENDED | REG_NEWLINE);
     if (ret != 0) {
         TM_ERROR("Failed to compile Go function regex");
         return TM_ERR_INTERNAL;
     }
     
-    /* Pattern: /path/file.go:line +0xNN */
+    /* Pattern: /path/file.go:line +0xNN (accepts tab or spaces for indentation) */
     ret = regcomp(&loc_re,
-                  "^\t([^:]+\\.go):([0-9]+)",
+                  "^[[:space:]]+([^:]+\\.go):([0-9]+)",
                   REG_EXTENDED | REG_NEWLINE);
     if (ret != 0) {
         regfree(&func_re);
@@ -276,9 +276,9 @@ tm_error_t tm_parse_go_trace(const char *input, tm_stack_trace_t *trace)
         return TM_ERR_INTERNAL;
     }
     
-    /* Pattern: panic: message */
+    /* Pattern: panic: message or Error: message */
     ret = regcomp(&panic_re,
-                  "^panic: (.*)$",
+                  "^(panic|Error|error): (.*)$",
                   REG_EXTENDED | REG_NEWLINE);
     if (ret != 0) {
         regfree(&func_re);
@@ -287,12 +287,13 @@ tm_error_t tm_parse_go_trace(const char *input, tm_stack_trace_t *trace)
         return TM_ERR_INTERNAL;
     }
     
-    /* Parse panic message */
-    regmatch_t matches[3];
-    if (regexec(&panic_re, input, 2, matches, 0) == 0) {
-        trace->error_type = tm_strdup("panic");
-        trace->error_message = tm_strndup(input + matches[1].rm_so,
-                                          (size_t)(matches[1].rm_eo - matches[1].rm_so));
+    /* Parse panic/error message */
+    regmatch_t matches[4];
+    if (regexec(&panic_re, input, 3, matches, 0) == 0) {
+        trace->error_type = tm_strndup(input + matches[1].rm_so,
+                                       (size_t)(matches[1].rm_eo - matches[1].rm_so));
+        trace->error_message = tm_strndup(input + matches[2].rm_so,
+                                          (size_t)(matches[2].rm_eo - matches[2].rm_so));
     }
     
     /* Parse stack frames - Go outputs function then location on next line */

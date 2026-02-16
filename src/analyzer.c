@@ -11,6 +11,7 @@
 
 #include "internal/common.h"
 #include "internal/parser.h"
+#include "internal/input_format.h"
 #include "internal/ast.h"
 #include "internal/git.h"
 #include "internal/llm.h"
@@ -335,12 +336,43 @@ tm_analysis_result_t *tm_analyze(tm_analyzer_t *analyzer, const char *input)
     report_progress(analyzer, "Parsing stack trace", 0.0f);
     
     size_t input_size = 0;
-    char *trace_text = read_input(input, &input_size);
-    if (!trace_text) {
+    char *raw_input = read_input(input, &input_size);
+    if (!raw_input) {
         result->error_message = tm_strdup("Failed to read input");
         result->analysis_time_ms = 0;
         TM_ERROR("Failed to read input");
         return result;
+    }
+    
+    /* Detect and extract stack traces from structured formats (JSON/CSV) */
+    char *trace_text = raw_input;
+    
+    /* Map config format hint to internal format type */
+    tm_ifmt_t format_hint = TM_IFMT_AUTO;
+    switch (analyzer->config->input_format) {
+        case TM_INPUT_RAW:  format_hint = TM_IFMT_RAW; break;
+        case TM_INPUT_JSON: format_hint = TM_IFMT_JSON; break;
+        case TM_INPUT_CSV:  format_hint = TM_IFMT_CSV; break;
+        default:            format_hint = TM_IFMT_AUTO; break;
+    }
+    
+    /* Check for structured format (auto-detect or explicit) */
+    bool is_structured = (format_hint != TM_IFMT_RAW) &&
+                         (format_hint != TM_IFMT_AUTO || 
+                          tm_is_structured_log(raw_input, input_size));
+    
+    if (is_structured) {
+        tm_ifmt_t fmt = (format_hint != TM_IFMT_AUTO) 
+            ? format_hint 
+            : tm_detect_input_format(raw_input, input_size);
+        TM_INFO("Input format: %s", tm_input_format_name(fmt));
+        
+        char *extracted = tm_extract_stack_traces(raw_input, input_size, fmt);
+        if (extracted) {
+            TM_FREE(raw_input);
+            trace_text = extracted;
+            input_size = strlen(trace_text);
+        }
     }
     
     result->trace = tm_parse_stack_trace(trace_text, input_size);
