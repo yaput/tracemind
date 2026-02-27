@@ -1,0 +1,59 @@
+# TraceMind Format Definition: NGINX Error Log
+# 
+# This file defines how to parse NGINX error logs.
+# Place custom format definitions in ~/.config/tracemind/formats/ or /etc/tracemind/formats/
+
+name: nginx_error
+version: "1.0"
+description: "NGINX error log format"
+
+# Pattern to match log lines (PCRE-style regex with named groups)
+patterns:
+  # Standard NGINX error format:
+  # 2024/01/15 10:30:45 [error] 1234#5678: *9999 message, client: IP, server: host, ...
+  line: '^(?P<timestamp>\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}) \[(?P<level>\w+)\] (?P<pid>\d+)#(?P<tid>\d+): (?:\*(?P<cid>\d+) )?(?P<message>.+)$'
+
+# Map extracted groups to unified log model fields
+field_mappings:
+  timestamp: timestamp
+  severity: level
+  message: message
+  metadata:
+    - pid
+    - tid
+    - cid
+
+# Severity level mapping (normalizes to standard levels)
+severity_mapping:
+  emerg: FATAL
+  alert: FATAL
+  crit: CRITICAL
+  error: ERROR
+  warn: WARNING
+  notice: INFO
+  info: INFO
+  debug: DEBUG
+
+# Patterns that indicate errors worth highlighting
+error_indicators:
+  - "upstream timed out"
+  - "connect() failed"
+  - "no live upstreams"
+  - "Connection refused"
+  - "Connection reset by peer"
+  - "client intended to send too large body"
+  - "SSL_do_handshake() failed"
+  - "peer closed connection"
+  - "upstream prematurely closed"
+  - "limiting requests"
+
+# Patterns for extracting additional context
+context_patterns:
+  # Extract client IP
+  client_ip: 'client: (?P<client_ip>[\d.]+)'
+  # Extract upstream server
+  upstream: 'upstream: "(?P<upstream>[^"]+)"'
+  # Extract request path  
+  request: 'request: "(?P<method>\w+) (?P<path>[^"]+)"'
+  # Extract response time (if present)
+  response_time: 'upstream_response_time[=:]"?(?P<response_time>[\d.]+)'

@@ -900,7 +900,7 @@ void tm_source_file_free(tm_source_file_t *file)
 }
 
 tm_error_t tm_extract_functions(const tm_source_file_t *file,
-                                tm_function_def_t ***funcs,
+                                tm_function_def_t **funcs,
                                 size_t *count)
 {
     (void)file;
@@ -931,7 +931,7 @@ tm_error_t tm_find_function_at_line(const tm_source_file_t *file,
 
 tm_error_t tm_extract_call_sites(const tm_source_file_t *file,
                                  const tm_function_def_t *func,
-                                 tm_call_site_t ***sites,
+                                 tm_call_site_t **sites,
                                  size_t *count)
 {
     (void)file;

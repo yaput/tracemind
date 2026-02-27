@@ -1,12 +1,11 @@
 # TraceMind - AI Root Cause Assistant
-# Build System
-# Optional: tree-sitter, libgit2 (for enhanced AST and git analysis)
+# Build System — auto-detects optional dependencies
 
 CC := gcc
 CFLAGS := -std=c11 -Wall -Wextra -Werror -pedantic -D_POSIX_C_SOURCE=200809L
 CFLAGS += -Iinclude -Isrc
 
-# macOS homebrew paths
+# Platform detection
 UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Darwin)
     BREW_PREFIX := $(shell brew --prefix 2>/dev/null)
@@ -18,14 +17,22 @@ endif
 
 LDFLAGS += -lcurl -ljansson
 
-# Optional dependencies - define HAVE_TREE_SITTER and/or HAVE_LIBGIT2
-# to enable these features if libraries are installed
-ifdef HAVE_TREE_SITTER
+# Auto-detect optional dependencies (override with HAVE_TREE_SITTER=0 / HAVE_LIBGIT2=0 to disable)
+ifndef HAVE_TREE_SITTER
+    HAVE_TREE_SITTER := $(shell pkg-config --exists tree-sitter 2>/dev/null && echo 1 || \
+        ([ -f "$(BREW_PREFIX)/lib/libtree-sitter.a" ] 2>/dev/null && echo 1 || echo 0))
+endif
+ifndef HAVE_LIBGIT2
+    HAVE_LIBGIT2 := $(shell pkg-config --exists libgit2 2>/dev/null && echo 1 || \
+        ([ -f "$(BREW_PREFIX)/lib/libgit2.dylib" ] 2>/dev/null && echo 1 || echo 0))
+endif
+
+ifeq ($(HAVE_TREE_SITTER),1)
 CFLAGS += -DHAVE_TREE_SITTER
 LDFLAGS += -ltree-sitter -ltree-sitter-python -ltree-sitter-go -ltree-sitter-javascript
 endif
 
-ifdef HAVE_LIBGIT2
+ifeq ($(HAVE_LIBGIT2),1)
 CFLAGS += -DHAVE_LIBGIT2
 LDFLAGS += -lgit2
 endif
@@ -53,9 +60,38 @@ TARGET := $(BIN_DIR)/tracemind
 TEST_SRCS := $(wildcard $(TEST_DIR)/*.c)
 TEST_BINS := $(TEST_SRCS:$(TEST_DIR)/%.c=$(BIN_DIR)/test_%)
 
-.PHONY: all debug release clean test install format check
+.PHONY: all debug release clean test install format check help info deps-mac deps-linux
 
 all: release
+
+help:  ## Show this help
+	@echo "TraceMind Build System"
+	@echo "====================="
+	@echo ""
+	@echo "Targets:"
+	@echo "  make              Build release binary"
+	@echo "  make debug        Build with sanitizers & debug info"
+	@echo "  make test         Build and run tests"
+	@echo "  make install      Install to $(PREFIX)/bin"
+	@echo "  make clean        Remove build artifacts"
+	@echo "  make info         Show detected features"
+	@echo "  make deps-mac     Install dependencies (macOS)"
+	@echo "  make deps-linux   Install dependencies (Linux)"
+	@echo "  make format       Run clang-format on sources"
+	@echo "  make check        Run cppcheck static analysis"
+	@echo ""
+	@echo "Options:"
+	@echo "  HAVE_TREE_SITTER=0  Disable tree-sitter (auto-detected)"
+	@echo "  HAVE_LIBGIT2=0      Disable libgit2 (auto-detected)"
+	@echo "  PREFIX=/usr/local   Install prefix"
+
+info:  ## Show detected build features
+	@echo "Platform:      $(UNAME_S)"
+	@echo "Compiler:      $(CC)"
+	@echo "tree-sitter:   $(if $(filter 1,$(HAVE_TREE_SITTER)),YES,NO)"
+	@echo "libgit2:       $(if $(filter 1,$(HAVE_LIBGIT2)),YES,NO)"
+	@echo "CFLAGS:        $(CFLAGS)"
+	@echo "LDFLAGS:       $(LDFLAGS)"
 
 debug: CFLAGS += $(DEBUG_FLAGS)
 debug: $(TARGET)
@@ -65,7 +101,9 @@ release: $(TARGET)
 
 $(TARGET): $(OBJS) | $(BIN_DIR)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
-	@echo "Built: $@"
+	@echo "✓ Built: $@"
+	@echo "  tree-sitter: $(if $(filter 1,$(HAVE_TREE_SITTER)),enabled,disabled)"
+	@echo "  libgit2:     $(if $(filter 1,$(HAVE_LIBGIT2)),enabled,disabled)"
 
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c | $(OBJ_DIR)
 	@mkdir -p $(dir $@)
@@ -100,14 +138,15 @@ install: release
 	install -m 755 $(TARGET) $(PREFIX)/bin/tracemind
 	@echo "Installed to $(PREFIX)/bin/tracemind"
 
+uninstall:
+	rm -f $(PREFIX)/bin/tracemind
+
 clean:
 	rm -rf build
 
-# Development helpers
-.PHONY: deps-mac deps-linux
-
+# Dependency installation
 deps-mac:
-	brew install tree-sitter libgit2 curl jansson cppcheck
+	brew install curl jansson libgit2 tree-sitter cppcheck
 
 deps-linux:
-	sudo apt-get install -y libtree-sitter-dev libgit2-dev libcurl4-openssl-dev libjansson-dev cppcheck
+	sudo apt-get install -y libcurl4-openssl-dev libjansson-dev libgit2-dev libtree-sitter-dev cppcheck

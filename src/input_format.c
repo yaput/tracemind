@@ -814,6 +814,703 @@ tm_log_entries_t *tm_extract_from_csv(const char *content,
 }
 
 /* ============================================================================
+ * Generic Log Model Implementation
+ * ========================================================================== */
+
+const char *tm_log_format_name(tm_log_format_t fmt)
+{
+    switch (fmt) {
+        case TM_LOG_FMT_UNKNOWN:     return "unknown";
+        case TM_LOG_FMT_STACKTRACE:  return "stack-trace";
+        case TM_LOG_FMT_NGINX:       return "nginx";
+        case TM_LOG_FMT_APACHE:      return "apache";
+        case TM_LOG_FMT_SYSLOG:      return "syslog";
+        case TM_LOG_FMT_DOCKER:      return "docker";
+        case TM_LOG_FMT_KUBERNETES:  return "kubernetes";
+        case TM_LOG_FMT_JSON_STRUCT: return "json-structured";
+        case TM_LOG_FMT_CUSTOM:      return "custom";
+        default:                     return "unknown";
+    }
+}
+
+tm_generic_log_t *tm_generic_log_new(void)
+{
+    tm_generic_log_t *log = tm_calloc(1, sizeof(tm_generic_log_t));
+    log->capacity = 64;
+    log->entries = tm_calloc(log->capacity, sizeof(tm_generic_log_entry_t));
+    log->detected_format = TM_LOG_FMT_UNKNOWN;
+    return log;
+}
+
+void tm_generic_log_entry_free_contents(tm_generic_log_entry_t *entry)
+{
+    if (!entry) return;
+    TM_FREE(entry->timestamp);
+    TM_FREE(entry->severity);
+    TM_FREE(entry->message);
+    TM_FREE(entry->source);
+    TM_FREE(entry->raw_line);
+    if (entry->trace) {
+        tm_stack_trace_free(entry->trace);
+        entry->trace = NULL;
+    }
+    if (entry->metadata) {
+        json_decref(entry->metadata);
+        entry->metadata = NULL;
+    }
+}
+
+void tm_generic_log_free(tm_generic_log_t *log)
+{
+    if (!log) return;
+    
+    for (size_t i = 0; i < log->count; i++) {
+        tm_generic_log_entry_free_contents(&log->entries[i]);
+    }
+    TM_FREE(log->entries);
+    
+    TM_FREE(log->format_description);
+    
+    for (size_t i = 0; i < log->error_signature_count; i++) {
+        TM_FREE(log->error_signatures[i]);
+    }
+    TM_FREE(log->error_signatures);
+    
+    for (size_t i = 0; i < log->anomaly_pattern_count; i++) {
+        TM_FREE(log->anomaly_patterns[i]);
+    }
+    TM_FREE(log->anomaly_patterns);
+    
+    TM_FREE(log->time_range_start);
+    TM_FREE(log->time_range_end);
+    
+    free(log);
+}
+
+void tm_generic_log_add_entry(tm_generic_log_t *log,
+                               const char *timestamp,
+                               const char *severity,
+                               const char *message,
+                               const char *source,
+                               const char *raw_line,
+                               size_t line_number)
+{
+    if (!log || !message) return;
+    
+    /* Grow if needed */
+    if (log->count >= log->capacity) {
+        log->capacity *= 2;
+        log->entries = tm_realloc(log->entries, 
+                                  log->capacity * sizeof(tm_generic_log_entry_t));
+    }
+    
+    tm_generic_log_entry_t *entry = &log->entries[log->count];
+    memset(entry, 0, sizeof(*entry));
+    
+    entry->timestamp = timestamp ? tm_strdup(timestamp) : NULL;
+    entry->severity = severity ? tm_strdup(severity) : NULL;
+    entry->message = tm_strdup(message);
+    entry->source = source ? tm_strdup(source) : NULL;
+    entry->raw_line = raw_line ? tm_strdup(raw_line) : NULL;
+    entry->line_number = line_number;
+    entry->relevance_score = 0.0f;
+    
+    /* Auto-detect error status from severity */
+    if (severity) {
+        if (strcasecmp(severity, "ERROR") == 0 ||
+            strcasecmp(severity, "FATAL") == 0 ||
+            strcasecmp(severity, "CRITICAL") == 0 ||
+            strcasecmp(severity, "EMERG") == 0 ||
+            strcasecmp(severity, "ALERT") == 0) {
+            entry->is_error = true;
+            log->total_errors++;
+        } else if (strcasecmp(severity, "WARN") == 0 ||
+                   strcasecmp(severity, "WARNING") == 0) {
+            log->total_warnings++;
+        } else if (strcasecmp(severity, "INFO") == 0) {
+            log->total_info++;
+        }
+    }
+    
+    /* Update time range */
+    if (timestamp) {
+        if (!log->time_range_start) {
+            log->time_range_start = tm_strdup(timestamp);
+        }
+        TM_FREE(log->time_range_end);
+        log->time_range_end = tm_strdup(timestamp);
+    }
+    
+    log->count++;
+}
+
+/* ============================================================================
+ * Generic Log Format Detection
+ * ========================================================================== */
+
+bool tm_has_stack_trace_patterns(const char *content, size_t len)
+{
+    if (!content || len == 0) return false;
+    
+    /* Create null-terminated copy for strstr (safe since we're doing pattern matching) */
+    /* Note: For large inputs, we could use a bounded search, but strstr is sufficient here */
+    (void)len;  /* Use len in bounds-checking logic if needed in future */
+    
+    /* Python */
+    if (strstr(content, "Traceback (most recent call last)")) return true;
+    if (strstr(content, "File \"") && strstr(content, ", line ")) return true;
+    
+    /* Go */
+    if (strstr(content, "panic:")) return true;
+    if (strstr(content, "goroutine ") && strstr(content, ".go:")) return true;
+    
+    /* Node.js/JS */
+    if (strstr(content, "    at ")) {
+        if (strstr(content, ".js:") || strstr(content, ".ts:")) return true;
+    }
+    
+    /* Java */
+    if (strstr(content, "\n\tat ") && strstr(content, ".java:")) return true;
+    if (strstr(content, "Exception in thread")) return true;
+    
+    return false;
+}
+
+tm_log_format_t tm_detect_log_format(const char *content, size_t len)
+{
+    if (!content || len == 0) return TM_LOG_FMT_UNKNOWN;
+    
+    /* Check for stack trace patterns first (highest priority) */
+    if (tm_has_stack_trace_patterns(content, len)) {
+        return TM_LOG_FMT_STACKTRACE;
+    }
+    
+    /* Sample first few lines for pattern detection */
+    const char *p = content;
+    const char *end = content + len;
+    int json_lines = 0;
+    int nginx_lines = 0;
+    int syslog_lines = 0;
+    int docker_lines = 0;
+    int sample_count = 0;
+    const int max_sample = 20;
+    
+    while (p < end && sample_count < max_sample) {
+        const char *line_end = memchr(p, '\n', (size_t)(end - p));
+        if (!line_end) line_end = end;
+        size_t line_len = (size_t)(line_end - p);
+        
+        if (line_len > 0) {
+            /* JSON structured logging (starts with {) */
+            if (*p == '{' && line_len > 2) {
+                json_lines++;
+            }
+            
+            /* NGINX combined format: IP - - [timestamp] "METHOD /path" status size */
+            if (line_len > 20) {
+                const char *bracket = memchr(p, '[', line_len);
+                const char *quote = memchr(p, '"', line_len);
+                if (bracket && quote && bracket < quote &&
+                    (memchr(p, '.', (size_t)(bracket - p)) != NULL)) {
+                    nginx_lines++;
+                }
+            }
+            
+            /* Syslog: <priority>timestamp hostname tag: message */
+            /* or: Mon DD HH:MM:SS hostname tag: message */
+            if (line_len > 15) {
+                if (*p == '<' || 
+                    (isalpha((unsigned char)p[0]) && isalpha((unsigned char)p[1]) && 
+                     isalpha((unsigned char)p[2]) && p[3] == ' ')) {
+                    if (strstr(p, ": ")) {
+                        syslog_lines++;
+                    }
+                }
+            }
+            
+            /* Docker logs: timestamp stdout/stderr message */
+            if (line_len > 30 && 
+                (strncmp(p + 23, " stdout ", 8) == 0 || 
+                 strncmp(p + 23, " stderr ", 8) == 0 ||
+                 strstr(p, "docker") || strstr(p, "container"))) {
+                docker_lines++;
+            }
+            
+            sample_count++;
+        }
+        
+        p = line_end + 1;
+    }
+    
+    /* Determine format based on detection counts */
+    if (json_lines > sample_count / 2) return TM_LOG_FMT_JSON_STRUCT;
+    if (nginx_lines > sample_count / 2) return TM_LOG_FMT_NGINX;
+    if (syslog_lines > sample_count / 2) return TM_LOG_FMT_SYSLOG;
+    if (docker_lines > sample_count / 3) return TM_LOG_FMT_DOCKER;
+    
+    /* Check for Kubernetes patterns */
+    if (strstr(content, "kube-") || strstr(content, "pod/") ||
+        strstr(content, "namespace=") || strstr(content, "kubernetes")) {
+        return TM_LOG_FMT_KUBERNETES;
+    }
+    
+    return TM_LOG_FMT_CUSTOM;
+}
+
+tm_analysis_mode_t tm_detect_analysis_mode(const char *content, size_t len)
+{
+    if (!content || len == 0) return TM_MODE_GENERIC_LOG;
+    
+    tm_log_format_t fmt = tm_detect_log_format(content, len);
+    
+    if (fmt == TM_LOG_FMT_STACKTRACE) {
+        return TM_MODE_STACK_TRACE;
+    }
+    
+    /* Check for embedded stack traces in structured logs */
+    if (fmt == TM_LOG_FMT_JSON_STRUCT) {
+        if (tm_has_stack_trace_patterns(content, len)) {
+            return TM_MODE_STACK_TRACE;
+        }
+    }
+    
+    return TM_MODE_GENERIC_LOG;
+}
+
+/* ============================================================================
+ * Generic Log Parsing
+ * ========================================================================== */
+
+/**
+ * Parse a syslog-style line.
+ * Format: <priority>timestamp hostname tag[pid]: message
+ * or: Mon DD HH:MM:SS hostname tag: message
+ */
+static bool parse_syslog_line(const char *line, size_t len,
+                               char **timestamp, char **severity,
+                               char **message, char **source)
+{
+    *timestamp = NULL;
+    *severity = NULL;
+    *message = NULL;
+    *source = NULL;
+    
+    if (len < 10) return false;
+    
+    const char *p = line;
+    const char *end = line + len;
+    
+    /* Optional priority: <N> */
+    int priority = -1;
+    if (*p == '<') {
+        p++;
+        char *pend;
+        priority = (int)strtol(p, &pend, 10);
+        if (*pend == '>') {
+            p = pend + 1;
+        }
+    }
+    
+    /* Timestamp (BSD style: Mon DD HH:MM:SS or ISO) */
+    const char *ts_start = p;
+    const char *colon = strstr(p, ": ");
+    if (!colon || colon > end) return false;
+    
+    /* Find where hostname/tag starts (after timestamp) */
+    const char *space = memchr(p, ' ', (size_t)(colon - p));
+    if (space) {
+        /* Extract timestamp (up to ~15 chars for BSD format) */
+        size_t ts_len = (space - ts_start);
+        if (ts_len > 30) ts_len = 30;  /* Sanity limit */
+        *timestamp = tm_strndup(ts_start, ts_len);
+        p = space + 1;
+        
+        /* Skip to message after colon */
+        *source = tm_strndup(p, (size_t)(colon - p));
+    }
+    
+    /* Message is everything after ": " */
+    *message = tm_strndup(colon + 2, (size_t)(end - colon - 2));
+    
+    /* Map priority to severity */
+    if (priority >= 0) {
+        int level = priority & 0x7;
+        const char *levels[] = {"EMERG", "ALERT", "CRITICAL", "ERROR", 
+                                "WARNING", "NOTICE", "INFO", "DEBUG"};
+        if (level < 8) {
+            *severity = tm_strdup(levels[level]);
+        }
+    }
+    
+    return true;
+}
+
+/**
+ * Parse JSON structured log line.
+ */
+static bool parse_json_log_line(const char *line, size_t len,
+                                 char **timestamp, char **severity,
+                                 char **message, char **source,
+                                 json_t **metadata)
+{
+    *timestamp = NULL;
+    *severity = NULL;
+    *message = NULL;
+    *source = NULL;
+    *metadata = NULL;
+    
+    json_error_t error;
+    json_t *obj = json_loadb(line, len, 0, &error);
+    if (!obj || !json_is_object(obj)) {
+        if (obj) json_decref(obj);
+        return false;
+    }
+    
+    /* Common timestamp fields */
+    const char *ts_fields[] = {"timestamp", "time", "@timestamp", "ts", "datetime", "date"};
+    for (size_t i = 0; i < sizeof(ts_fields)/sizeof(ts_fields[0]); i++) {
+        json_t *ts = json_object_get(obj, ts_fields[i]);
+        if (ts && json_is_string(ts)) {
+            *timestamp = tm_strdup(json_string_value(ts));
+            break;
+        }
+    }
+    
+    /* Common severity/level fields */
+    const char *sev_fields[] = {"level", "severity", "loglevel", "log_level", "lvl"};
+    for (size_t i = 0; i < sizeof(sev_fields)/sizeof(sev_fields[0]); i++) {
+        json_t *sev = json_object_get(obj, sev_fields[i]);
+        if (sev && json_is_string(sev)) {
+            *severity = tm_strdup(json_string_value(sev));
+            break;
+        }
+    }
+    
+    /* Common message fields */
+    const char *msg_fields[] = {"message", "msg", "@message", "text", "log"};
+    for (size_t i = 0; i < sizeof(msg_fields)/sizeof(msg_fields[0]); i++) {
+        json_t *msg = json_object_get(obj, msg_fields[i]);
+        if (msg && json_is_string(msg)) {
+            *message = tm_strdup(json_string_value(msg));
+            break;
+        }
+    }
+    
+    /* Source/logger fields */
+    const char *src_fields[] = {"source", "logger", "service", "component", "name"};
+    for (size_t i = 0; i < sizeof(src_fields)/sizeof(src_fields[0]); i++) {
+        json_t *src = json_object_get(obj, src_fields[i]);
+        if (src && json_is_string(src)) {
+            *source = tm_strdup(json_string_value(src));
+            break;
+        }
+    }
+    
+    /* If no message found, stringify entire object */
+    if (!*message) {
+        *message = json_dumps(obj, JSON_COMPACT);
+    }
+    
+    /* Keep metadata reference */
+    *metadata = obj;
+    
+    return (*message != NULL);
+}
+
+/**
+ * Parse generic log line with heuristics.
+ */
+static bool parse_generic_line(const char *line, size_t len,
+                                char **timestamp, char **severity,
+                                char **message, char **source)
+{
+    *timestamp = NULL;
+    *severity = NULL;
+    *message = NULL;
+    *source = NULL;
+    
+    if (len < 3) return false;
+    
+    /* Try to extract timestamp (ISO 8601 or common formats) */
+    const char *p = line;
+    
+    /* ISO 8601: 2024-01-15T10:30:00 or 2024-01-15 10:30:00 */
+    if (len > 19 && p[4] == '-' && p[7] == '-' && 
+        (p[10] == 'T' || p[10] == ' ') && p[13] == ':') {
+        *timestamp = tm_strndup(p, 19);
+        p += 19;
+        while (p < line + len && (*p == ' ' || *p == 'Z' || *p == '+' || *p == '-' || isdigit((unsigned char)*p))) {
+            if (*p == ' ' && *(p+1) != ' ') break;
+            p++;
+        }
+        while (p < line + len && *p == ' ') p++;
+    }
+    
+    /* Try to extract severity level */
+    const char *levels[] = {"ERROR", "WARN", "WARNING", "INFO", "DEBUG", 
+                           "FATAL", "CRITICAL", "TRACE", "NOTICE"};
+    for (size_t i = 0; i < sizeof(levels)/sizeof(levels[0]); i++) {
+        size_t llen = strlen(levels[i]);
+        /* Look for [LEVEL] or LEVEL: patterns */
+        const char *match = NULL;
+        if (*p == '[') {
+            if (strncasecmp(p + 1, levels[i], llen) == 0 && p[1 + llen] == ']') {
+                *severity = tm_strdup(levels[i]);
+                p += 2 + llen;
+                while (p < line + len && *p == ' ') p++;
+                match = p;
+            }
+        } else if (strncasecmp(p, levels[i], llen) == 0 && 
+                   (p[llen] == ':' || p[llen] == ' ' || p[llen] == '\t')) {
+            *severity = tm_strdup(levels[i]);
+            p += llen;
+            if (*p == ':') p++;
+            while (p < line + len && *p == ' ') p++;
+            match = p;
+        }
+        if (match) break;
+    }
+    
+    /* Remainder is the message */
+    size_t remaining = (size_t)(line + len - p);
+    if (remaining > 0) {
+        *message = tm_strndup(p, remaining);
+    }
+    
+    return (*message != NULL);
+}
+
+tm_generic_log_t *tm_parse_generic_log(const char *content, 
+                                        size_t len,
+                                        tm_log_format_t format_hint)
+{
+    if (!content || len == 0) return NULL;
+    
+    tm_generic_log_t *log = tm_generic_log_new();
+    
+    /* Auto-detect format if not specified */
+    tm_log_format_t fmt = format_hint;
+    if (fmt == TM_LOG_FMT_UNKNOWN) {
+        fmt = tm_detect_log_format(content, len);
+    }
+    log->detected_format = fmt;
+    log->format_description = tm_strdup(tm_log_format_name(fmt));
+    
+    /* Parse line by line */
+    const char *line_start = content;
+    const char *end = content + len;
+    size_t line_num = 0;
+    
+    while (line_start < end) {
+        line_num++;
+        
+        const char *line_end = memchr(line_start, '\n', (size_t)(end - line_start));
+        if (!line_end) line_end = end;
+        
+        size_t line_len = (size_t)(line_end - line_start);
+        
+        /* Skip empty lines */
+        if (line_len == 0 || (line_len == 1 && *line_start == '\r')) {
+            line_start = line_end + 1;
+            continue;
+        }
+        
+        /* Strip CR if present */
+        if (line_len > 0 && line_start[line_len - 1] == '\r') {
+            line_len--;
+        }
+        
+        char *timestamp = NULL;
+        char *severity = NULL;
+        char *message = NULL;
+        char *source = NULL;
+        json_t *metadata = NULL;
+        bool parsed = false;
+        
+        switch (fmt) {
+            case TM_LOG_FMT_JSON_STRUCT:
+                parsed = parse_json_log_line(line_start, line_len,
+                                              &timestamp, &severity, &message, &source, &metadata);
+                break;
+                
+            case TM_LOG_FMT_SYSLOG:
+                parsed = parse_syslog_line(line_start, line_len,
+                                            &timestamp, &severity, &message, &source);
+                break;
+                
+            default:
+                parsed = parse_generic_line(line_start, line_len,
+                                             &timestamp, &severity, &message, &source);
+                break;
+        }
+        
+        if (parsed && message) {
+            tm_generic_log_add_entry(log, timestamp, severity, message, source,
+                                      tm_strndup(line_start, line_len), line_num);
+            
+            /* Store metadata for last entry if present */
+            if (metadata && log->count > 0) {
+                log->entries[log->count - 1].metadata = metadata;
+            } else if (metadata) {
+                json_decref(metadata);
+            }
+        } else {
+            /* Failed to parse - store as raw message */
+            tm_generic_log_add_entry(log, NULL, NULL, 
+                                      tm_strndup(line_start, line_len),
+                                      NULL, tm_strndup(line_start, line_len), line_num);
+        }
+        
+        TM_FREE(timestamp);
+        TM_FREE(severity);
+        TM_FREE(message);
+        TM_FREE(source);
+        
+        line_start = line_end + 1;
+    }
+    
+    TM_DEBUG("Parsed %zu log entries (format: %s, errors: %zu)", 
+             log->count, log->format_description, log->total_errors);
+    
+    return log;
+}
+
+void tm_score_entry_relevance(tm_generic_log_t *log)
+{
+    if (!log) return;
+    
+    /* Error keywords and their weights */
+    static const struct { const char *pattern; float weight; } patterns[] = {
+        {"error", 0.3f},
+        {"exception", 0.4f},
+        {"failed", 0.3f},
+        {"failure", 0.3f},
+        {"timeout", 0.25f},
+        {"refused", 0.25f},
+        {"denied", 0.2f},
+        {"crash", 0.5f},
+        {"panic", 0.5f},
+        {"fatal", 0.5f},
+        {"critical", 0.4f},
+        {"segfault", 0.5f},
+        {"oom", 0.4f},
+        {"out of memory", 0.4f},
+        {"connection reset", 0.3f},
+        {"502", 0.35f},
+        {"503", 0.35f},
+        {"500", 0.3f},
+        {NULL, 0}
+    };
+    
+    for (size_t i = 0; i < log->count; i++) {
+        tm_generic_log_entry_t *e = &log->entries[i];
+        float score = 0.0f;
+        
+        /* Base score from severity */
+        if (e->is_error) {
+            score += 0.4f;
+        } else if (e->severity && 
+                   (strcasecmp(e->severity, "WARN") == 0 || 
+                    strcasecmp(e->severity, "WARNING") == 0)) {
+            score += 0.15f;
+        }
+        
+        /* Pattern matching on message */
+        if (e->message) {
+            for (size_t j = 0; patterns[j].pattern; j++) {
+                if (tm_strcasestr(e->message, patterns[j].pattern)) {
+                    score += patterns[j].weight;
+                }
+            }
+        }
+        
+        /* Cap at 1.0 */
+        e->relevance_score = score > 1.0f ? 1.0f : score;
+        
+        /* Mark high-relevance entries as anomalies */
+        if (e->relevance_score >= 0.5f) {
+            e->is_anomaly = true;
+        }
+    }
+}
+
+tm_generic_log_t *tm_extract_errors(const tm_generic_log_t *log)
+{
+    if (!log) return NULL;
+    
+    tm_generic_log_t *filtered = tm_generic_log_new();
+    filtered->detected_format = log->detected_format;
+    filtered->format_description = log->format_description ? 
+        tm_strdup(log->format_description) : NULL;
+    
+    for (size_t i = 0; i < log->count; i++) {
+        const tm_generic_log_entry_t *e = &log->entries[i];
+        if (e->is_error || e->is_anomaly) {
+            tm_generic_log_add_entry(filtered, e->timestamp, e->severity,
+                                      e->message, e->source, e->raw_line, e->line_number);
+            
+            /* Copy relevance score */
+            if (filtered->count > 0) {
+                filtered->entries[filtered->count - 1].relevance_score = e->relevance_score;
+                filtered->entries[filtered->count - 1].is_error = e->is_error;
+                filtered->entries[filtered->count - 1].is_anomaly = e->is_anomaly;
+            }
+        }
+    }
+    
+    return filtered;
+}
+
+tm_error_t tm_unified_parse(const char *content,
+                            size_t len,
+                            tm_analysis_mode_t *mode,
+                            tm_stack_trace_t **trace,
+                            tm_generic_log_t **log)
+{
+    if (!content || len == 0) return TM_ERR_INVALID_ARG;
+    if (!mode || !trace || !log) return TM_ERR_INVALID_ARG;
+    
+    *trace = NULL;
+    *log = NULL;
+    
+    /* Detect appropriate analysis mode */
+    *mode = tm_detect_analysis_mode(content, len);
+    
+    if (*mode == TM_MODE_STACK_TRACE) {
+        /* Extract stack traces (handles structured input) */
+        char *extracted = tm_extract_stack_traces(content, len, TM_IFMT_AUTO);
+        if (extracted) {
+            *trace = tm_parse_stack_trace(extracted, strlen(extracted));
+            TM_FREE(extracted);
+            
+            if (*trace) {
+                TM_INFO("Parsed as stack trace (language: %s)", 
+                        tm_language_name((*trace)->language));
+                return TM_OK;
+            }
+        }
+        /* Fall through to generic parsing if stack trace parsing fails */
+        *mode = TM_MODE_GENERIC_LOG;
+    }
+    
+    /* Generic log parsing */
+    *log = tm_parse_generic_log(content, len, TM_LOG_FMT_UNKNOWN);
+    if (!*log || (*log)->count == 0) {
+        tm_generic_log_free(*log);
+        *log = NULL;
+        return TM_ERR_PARSE;
+    }
+    
+    /* Score relevance */
+    tm_score_entry_relevance(*log);
+    
+    TM_INFO("Parsed as generic log (format: %s, entries: %zu, errors: %zu)",
+            (*log)->format_description, (*log)->count, (*log)->total_errors);
+    
+    return TM_OK;
+}
+
+/* ============================================================================
  * High-Level API
  * ========================================================================== */
 

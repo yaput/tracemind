@@ -8,6 +8,7 @@
 #define TM_INTERNAL_LLM_H
 
 #include "tracemind.h"
+#include "internal/input_format.h"
 #include <curl/curl.h>
 
 /* ============================================================================
@@ -57,7 +58,7 @@ void tm_llm_client_free(tm_llm_client_t *client);
  * ========================================================================== */
 
 /**
- * Analysis context for prompt building.
+ * Analysis context for prompt building (stack trace mode).
  */
 typedef struct {
     const tm_stack_trace_t *trace;
@@ -67,16 +68,41 @@ typedef struct {
 } tm_analysis_context_t;
 
 /**
- * Build the analysis prompt from context.
+ * Generic log analysis context for prompt building (format-agnostic mode).
+ */
+typedef struct {
+    const tm_generic_log_t *log;           /* Parsed generic log entries */
+    const tm_git_context_t *git_ctx;       /* Git context if available */
+    const char *additional_context;        /* Optional user-provided context */
+    size_t max_entries;                    /* Max entries to include (0 = all) */
+    bool include_raw_lines;                /* Include raw log lines in prompt */
+    bool errors_only;                      /* Only include error entries */
+} tm_generic_analysis_ctx_t;
+
+/**
+ * Build the analysis prompt from stack trace context.
  * Returns allocated string (caller must free).
  */
 char *tm_build_analysis_prompt(const tm_analysis_context_t *ctx);
+
+/**
+ * Build analysis prompt from generic log context.
+ * Returns allocated string (caller must free).
+ */
+char *tm_build_generic_log_prompt(const tm_generic_analysis_ctx_t *ctx);
 
 /**
  * Build a system prompt for root cause analysis.
  * Returns allocated string (caller must free).
  */
 char *tm_build_system_prompt(void);
+
+/**
+ * Build system prompt for generic log analysis.
+ * Format-aware prompt that adapts to detected log format.
+ * Returns allocated string (caller must free).
+ */
+char *tm_build_generic_system_prompt(tm_log_format_t format);
 
 /* ============================================================================
  * LLM API Calls
@@ -144,7 +170,7 @@ tm_error_t tm_parse_hypotheses(const char *response_text,
                                size_t *count);
 
 /**
- * Generate hypotheses from analysis context.
+ * Generate hypotheses from stack trace analysis context.
  * Main entry point for LLM-based root cause analysis.
  */
 tm_error_t tm_llm_generate_hypotheses(tm_llm_client_t *client,
@@ -153,6 +179,34 @@ tm_error_t tm_llm_generate_hypotheses(tm_llm_client_t *client,
                                       const tm_git_context_t *git_ctx,
                                       tm_hypothesis_t ***hypotheses,
                                       size_t *count);
+
+/**
+ * Generate hypotheses from generic log analysis.
+ * Used for format-agnostic log analysis mode.
+ */
+tm_error_t tm_llm_generate_generic_hypotheses(tm_llm_client_t *client,
+                                              const tm_generic_log_t *log,
+                                              const tm_git_context_t *git_ctx,
+                                              tm_hypothesis_t ***hypotheses,
+                                              size_t *count);
+
+/**
+ * Generate hypotheses for a freeform error string (no trace needed).
+ * Used by the "explain" command.
+ */
+tm_error_t tm_llm_explain_error(tm_llm_client_t *client,
+                                const char *error_msg,
+                                tm_hypothesis_t ***hypotheses,
+                                size_t *count);
+
+/**
+ * Send a follow-up question in the context of an existing analysis.
+ * Returns an allocated string with the LLM response (caller must free).
+ */
+tm_error_t tm_llm_followup(tm_llm_client_t *client,
+                           const tm_analysis_result_t *result,
+                           const char *question,
+                           char **response_out);
 
 /**
  * Free a single hypothesis.

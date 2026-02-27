@@ -59,6 +59,14 @@ jobs:
           make release
           strip build/bin/${{ env.BINARY_NAME }} || true
 
+      - name: Sign binary (macOS)
+        if: matrix.os == 'macos'
+        run: |
+          # Ad-hoc sign the binary so macOS doesn't immediately reject it
+          codesign --force --sign - --timestamp=none build/bin/${{ env.BINARY_NAME }}
+          # Verify signature
+          codesign -dv --verbose=4 build/bin/${{ env.BINARY_NAME }} || true
+
       - name: Prepare artifact
         run: |
           mkdir -p dist

@@ -135,8 +135,9 @@ bool tm_is_stdlib_path(const char *path, tm_language_t lang)
     
     switch (lang) {
     case TM_LANG_PYTHON:
-        return strstr(path, "/lib/python") != NULL ||
-               strstr(path, "/site-packages/") == NULL;
+        return strstr(path, "/lib/python") != NULL &&
+               strstr(path, "/site-packages/") == NULL &&
+               strstr(path, "/dist-packages/") == NULL;
     case TM_LANG_GO:
         return tm_str_starts_with(path, "/usr/local/go/src/") ||
                strstr(path, "GOROOT") != NULL;

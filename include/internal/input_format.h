@@ -6,12 +6,17 @@
  * - AWS CloudWatch Logs
  * - Generic JSON lines format
  * - CSV/TSV exports
+ * 
+ * Also supports format-agnostic generic log analysis for:
+ * - NGINX, Apache, Syslog, custom application logs
+ * - Any text-based log format via LLM-assisted interpretation
  */
 
 #ifndef TM_INTERNAL_INPUT_FORMAT_H
 #define TM_INTERNAL_INPUT_FORMAT_H
 
 #include "tracemind.h"
+#include <jansson.h>
 
 /* ============================================================================
  * Input Format Types
@@ -26,8 +31,125 @@ typedef enum {
     TM_IFMT_JSON,             /* JSON lines (NDJSON) */
     TM_IFMT_JSON_ARRAY,       /* JSON array of objects */
     TM_IFMT_CSV,              /* CSV with headers */
-    TM_IFMT_TSV               /* TSV with headers */
+    TM_IFMT_TSV,              /* TSV with headers */
+    TM_IFMT_GENERIC           /* Generic log format (LLM-assisted) */
 } tm_ifmt_t;
+
+/* ============================================================================
+ * Analysis Mode (uses public API enum from tracemind.h)
+ * ========================================================================== */
+
+/* Analysis mode constants - map to public API enum:
+ * TM_MODE_AUTO        = TM_ANALYSIS_AUTO
+ * TM_MODE_STACK_TRACE = TM_ANALYSIS_TRACE  
+ * TM_MODE_GENERIC_LOG = TM_ANALYSIS_LOG
+ */
+#define TM_MODE_AUTO         TM_ANALYSIS_AUTO
+#define TM_MODE_STACK_TRACE  TM_ANALYSIS_TRACE
+#define TM_MODE_GENERIC_LOG  TM_ANALYSIS_LOG
+
+/* ============================================================================
+ * Unified Log Model (Format-Agnostic)
+ * ========================================================================== */
+
+/**
+ * Detected log format family (for format-aware prompts).
+ */
+typedef enum {
+    TM_LOG_FMT_UNKNOWN = 0,
+    TM_LOG_FMT_STACKTRACE,    /* Python/Go/JS exception trace */
+    TM_LOG_FMT_NGINX,         /* NGINX access/error logs */
+    TM_LOG_FMT_APACHE,        /* Apache access/error logs */
+    TM_LOG_FMT_SYSLOG,        /* RFC 3164/5424 syslog */
+    TM_LOG_FMT_DOCKER,        /* Docker container logs */
+    TM_LOG_FMT_KUBERNETES,    /* K8s pod logs */
+    TM_LOG_FMT_JSON_STRUCT,   /* Structured JSON logging */
+    TM_LOG_FMT_CUSTOM         /* Application-specific format */
+} tm_log_format_t;
+
+/**
+ * Get format family name as string.
+ */
+const char *tm_log_format_name(tm_log_format_t fmt);
+
+/**
+ * Generic log entry (format-agnostic representation).
+ */
+typedef struct {
+    char *timestamp;              /* Timestamp string (any format) */
+    char *severity;               /* Log level (ERROR/WARN/INFO/DEBUG/etc) */
+    char *message;                /* Primary message content */
+    char *source;                 /* Source identifier (file, service, host) */
+    
+    /* Extracted context (optional, populated when detected) */
+    tm_stack_trace_t *trace;      /* Stack trace if found within entry */
+    json_t *metadata;             /* Arbitrary key-value pairs from structured logs */
+    
+    /* Analysis markers (populated during analysis phase) */
+    bool is_error;                /* Entry contains error indicators */
+    bool is_anomaly;              /* Entry flagged as anomalous */
+    float relevance_score;        /* 0.0-1.0 relevance to analysis */
+    
+    /* Raw data */
+    char *raw_line;               /* Original unparsed line */
+    size_t line_number;           /* Line number in source */
+} tm_generic_log_entry_t;
+
+/**
+ * Collection of generic log entries with analysis metadata.
+ */
+typedef struct {
+    /* Entries */
+    tm_generic_log_entry_t *entries;
+    size_t count;
+    size_t capacity;
+    
+    /* Format detection results */
+    tm_log_format_t detected_format;
+    char *format_description;     /* Human-readable format description */
+    
+    /* Aggregate analysis */
+    char **error_signatures;      /* Unique error patterns */
+    size_t error_signature_count;
+    
+    char **anomaly_patterns;      /* Detected anomaly patterns */
+    size_t anomaly_pattern_count;
+    
+    /* Time range */
+    char *time_range_start;       /* First timestamp */
+    char *time_range_end;         /* Last timestamp */
+    
+    /* Statistics */
+    size_t total_errors;
+    size_t total_warnings;
+    size_t total_info;
+} tm_generic_log_t;
+
+/**
+ * Create new generic log container.
+ */
+tm_generic_log_t *tm_generic_log_new(void);
+
+/**
+ * Add entry to generic log (takes ownership of fields).
+ */
+void tm_generic_log_add_entry(tm_generic_log_t *log,
+                               const char *timestamp,
+                               const char *severity,
+                               const char *message,
+                               const char *source,
+                               const char *raw_line,
+                               size_t line_number);
+
+/**
+ * Free generic log and all entries.
+ */
+void tm_generic_log_free(tm_generic_log_t *log);
+
+/**
+ * Free a single generic log entry's contents.
+ */
+void tm_generic_log_entry_free_contents(tm_generic_log_entry_t *entry);
 
 /**
  * Known field names for extracting stack traces from structured logs.
@@ -140,6 +262,65 @@ tm_log_entries_t *tm_extract_from_csv(const char *content,
 void tm_log_entries_free(tm_log_entries_t *entries);
 
 /* ============================================================================
+ * Generic Log Analysis (Format-Agnostic)
+ * ========================================================================== */
+
+/**
+ * Detect the log format family from content.
+ * Uses heuristics to identify common log patterns.
+ * 
+ * @param content       Raw log content
+ * @param len           Content length
+ * @return              Detected log format family
+ */
+tm_log_format_t tm_detect_log_format(const char *content, size_t len);
+
+/**
+ * Determine recommended analysis mode from content.
+ * Decides whether to use stack trace analysis or generic log analysis.
+ * 
+ * @param content       Raw input content
+ * @param len           Content length
+ * @return              Recommended analysis mode
+ */
+tm_analysis_mode_t tm_detect_analysis_mode(const char *content, size_t len);
+
+/**
+ * Parse generic logs into unified model.
+ * Works with any text-based log format.
+ * 
+ * @param content       Raw log content
+ * @param len           Content length
+ * @param format_hint   Format hint (TM_LOG_FMT_UNKNOWN for auto-detect)
+ * @return              Parsed generic log (caller owns)
+ */
+tm_generic_log_t *tm_parse_generic_log(const char *content, 
+                                        size_t len,
+                                        tm_log_format_t format_hint);
+
+/**
+ * Extract error entries from generic log.
+ * Filters to only ERROR/FATAL/CRITICAL severity entries.
+ * 
+ * @param log           Parsed generic log
+ * @return              Filtered log containing only errors (caller owns)
+ */
+tm_generic_log_t *tm_extract_errors(const tm_generic_log_t *log);
+
+/**
+ * Score entry relevance based on error keywords and patterns.
+ * Updates the relevance_score field on entries.
+ * 
+ * @param log           Generic log to score
+ */
+void tm_score_entry_relevance(tm_generic_log_t *log);
+
+/**
+ * Check if content contains recognizable stack trace patterns.
+ */
+bool tm_has_stack_trace_patterns(const char *content, size_t len);
+
+/* ============================================================================
  * High-Level API
  * ========================================================================== */
 
@@ -161,5 +342,22 @@ char *tm_extract_stack_traces(const char *content,
  * Quick heuristic check before expensive parsing.
  */
 bool tm_is_structured_log(const char *content, size_t len);
+
+/**
+ * Unified analysis entry point.
+ * Auto-detects format and mode, returning either stack trace or generic log.
+ * 
+ * @param content       Raw input content
+ * @param len           Content length
+ * @param[out] mode     Detected/used analysis mode
+ * @param[out] trace    Stack trace result (if mode is STACK_TRACE)
+ * @param[out] log      Generic log result (if mode is GENERIC_LOG)
+ * @return              TM_OK on success
+ */
+tm_error_t tm_unified_parse(const char *content,
+                            size_t len,
+                            tm_analysis_mode_t *mode,
+                            tm_stack_trace_t **trace,
+                            tm_generic_log_t **log);
 
 #endif /* TM_INTERNAL_INPUT_FORMAT_H */

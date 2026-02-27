@@ -460,7 +460,8 @@ tm_error_t tm_parse_nodejs_trace(const char *input, tm_stack_trace_t *trace)
                                     (size_t)(matches[1].rm_eo - matches[1].rm_so));
             
             /* Skip if this looks like a module path in a function call match */
-            if (strstr(cursor + matches[0].rm_so - 5, "at ") == NULL) {
+            size_t lookback = matches[0].rm_so < 5 ? matches[0].rm_so : 5;
+            if (strstr(cursor + matches[0].rm_so - lookback, "at ") == NULL) {
                 TM_FREE(file);
                 cursor++;
                 continue;

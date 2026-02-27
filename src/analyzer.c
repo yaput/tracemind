@@ -332,8 +332,8 @@ tm_analysis_result_t *tm_analyze(tm_analyzer_t *analyzer, const char *input)
     
     TM_INFO("Starting analysis");
     
-    /* ========== Phase 1: Parse Stack Trace ========== */
-    report_progress(analyzer, "Parsing stack trace", 0.0f);
+    /* ========== Phase 1: Parse Input (Format-Agnostic) ========== */
+    report_progress(analyzer, "Parsing input", 0.0f);
     
     size_t input_size = 0;
     char *raw_input = read_input(input, &input_size);
@@ -344,107 +344,108 @@ tm_analysis_result_t *tm_analyze(tm_analyzer_t *analyzer, const char *input)
         return result;
     }
     
-    /* Detect and extract stack traces from structured formats (JSON/CSV) */
-    char *trace_text = raw_input;
+    /* Use unified parsing to auto-detect mode */
+    tm_analysis_mode_t mode = TM_MODE_AUTO;
+    tm_stack_trace_t *trace = NULL;
+    tm_generic_log_t *generic_log = NULL;
     
-    /* Map config format hint to internal format type */
-    tm_ifmt_t format_hint = TM_IFMT_AUTO;
-    switch (analyzer->config->input_format) {
-        case TM_INPUT_RAW:  format_hint = TM_IFMT_RAW; break;
-        case TM_INPUT_JSON: format_hint = TM_IFMT_JSON; break;
-        case TM_INPUT_CSV:  format_hint = TM_IFMT_CSV; break;
-        default:            format_hint = TM_IFMT_AUTO; break;
-    }
+    tm_error_t parse_err = tm_unified_parse(raw_input, input_size, &mode, &trace, &generic_log);
+    TM_FREE(raw_input);
     
-    /* Check for structured format (auto-detect or explicit) */
-    bool is_structured = (format_hint != TM_IFMT_RAW) &&
-                         (format_hint != TM_IFMT_AUTO || 
-                          tm_is_structured_log(raw_input, input_size));
-    
-    if (is_structured) {
-        tm_ifmt_t fmt = (format_hint != TM_IFMT_AUTO) 
-            ? format_hint 
-            : tm_detect_input_format(raw_input, input_size);
-        TM_INFO("Input format: %s", tm_input_format_name(fmt));
-        
-        char *extracted = tm_extract_stack_traces(raw_input, input_size, fmt);
-        if (extracted) {
-            TM_FREE(raw_input);
-            trace_text = extracted;
-            input_size = strlen(trace_text);
-        }
-    }
-    
-    result->trace = tm_parse_stack_trace(trace_text, input_size);
-    TM_FREE(trace_text);
-    
-    if (!result->trace || result->trace->frame_count == 0) {
-        result->error_message = tm_strdup("Failed to parse stack trace");
-        TM_ERROR("Failed to parse stack trace");
+    if (parse_err != TM_OK) {
+        result->error_message = tm_strdup("Failed to parse input - not a recognized log format");
+        TM_ERROR("Failed to parse input");
         return result;
     }
     
-    TM_INFO("Parsed %zu stack frames (%s)", 
-            result->trace->frame_count,
-            tm_language_name(result->trace->language));
+    /* Store results based on mode */
+    result->trace = trace;
     
-    report_progress(analyzer, "Stack trace parsed", 0.15f);
+    /* Branch based on analysis mode */
+    bool is_generic_mode = (mode == TM_MODE_GENERIC_LOG && generic_log != NULL);
+    
+    if (is_generic_mode) {
+        TM_INFO("Analysis mode: GENERIC LOG (%s format, %zu entries, %zu errors)", 
+                generic_log->format_description,
+                generic_log->count,
+                generic_log->total_errors);
+        report_progress(analyzer, "Log parsed (generic mode)", 0.15f);
+    } else if (result->trace && result->trace->frame_count > 0) {
+        TM_INFO("Analysis mode: STACK TRACE (%zu frames, %s)", 
+                result->trace->frame_count,
+                tm_language_name(result->trace->language));
+        report_progress(analyzer, "Stack trace parsed", 0.15f);
+    } else {
+        /* Neither mode succeeded */
+        tm_generic_log_free(generic_log);
+        result->error_message = tm_strdup("Failed to parse input as stack trace or log");
+        TM_ERROR("Failed to parse input");
+        return result;
+    }
     
     /* ========== Phase 2: Find Repository ========== */
-    char *repo_path = analyzer->config->repo_path 
-        ? tm_strdup(analyzer->config->repo_path)
-        : find_repo_from_trace(result->trace);
+    char *repo_path = NULL;
+    
+    if (!is_generic_mode && result->trace) {
+        repo_path = analyzer->config->repo_path 
+            ? tm_strdup(analyzer->config->repo_path)
+            : find_repo_from_trace(result->trace);
+    } else if (analyzer->config->repo_path) {
+        repo_path = tm_strdup(analyzer->config->repo_path);
+    }
     
     if (!repo_path) {
-        TM_WARN("Could not find repository root");
+        TM_DEBUG("No repository root found (optional for generic log mode)");
     } else {
         TM_DEBUG("Using repository: %s", repo_path);
     }
     
-    /* ========== Phase 3: Build Call Graph ========== */
-    report_progress(analyzer, "Analyzing code structure", 0.20f);
-    
-    if (repo_path) {
-        tm_ast_builder_t *ast = tm_ast_builder_new();
-        if (ast) {
-            /* Collect files from trace */
-            size_t file_count = 0;
-            char **files = collect_trace_files(result->trace, repo_path, &file_count);
-            
-            if (files && file_count > 0) {
-                TM_DEBUG("Analyzing %zu files", file_count);
+    /* ========== Phase 3: Build Call Graph (Stack Trace Mode Only) ========== */
+    if (!is_generic_mode && result->trace && result->trace->frame_count > 0) {
+        report_progress(analyzer, "Analyzing code structure", 0.20f);
+        
+        if (repo_path) {
+            tm_ast_builder_t *ast = tm_ast_builder_new();
+            if (ast) {
+                /* Collect files from trace */
+                size_t file_count = 0;
+                char **files = collect_trace_files(result->trace, repo_path, &file_count);
                 
-                for (size_t i = 0; i < file_count; i++) {
-                    tm_ast_add_file(ast, files[i]);
-                    TM_FREE(files[i]);
-                }
-                TM_FREE(files);
-                
-                /* Build call graph focused on crash location */
-                if (result->trace->frame_count > 0) {
+                if (files && file_count > 0) {
+                    TM_DEBUG("Analyzing %zu files", file_count);
+                    
+                    for (size_t i = 0; i < file_count; i++) {
+                        tm_ast_add_file(ast, files[i]);
+                        TM_FREE(files[i]);
+                    }
+                    TM_FREE(files);
+                    
+                    /* Build call graph focused on crash location */
                     const char *entry = result->trace->frames[0].function;
                     result->call_graph = tm_ast_build_call_graph(
                         ast, entry, analyzer->config->max_call_depth);
                 }
+                
+                tm_ast_builder_free(ast);
             }
-            
-            tm_ast_builder_free(ast);
         }
+        
+        if (result->call_graph) {
+            TM_INFO("Built call graph with %zu functions, %zu edges",
+                    result->call_graph->node_count,
+                    result->call_graph->edge_count);
+        }
+        
+        report_progress(analyzer, "Code structure analyzed", 0.40f);
+    } else {
+        report_progress(analyzer, "Skipping code analysis (generic mode)", 0.40f);
     }
-    
-    if (result->call_graph) {
-        TM_INFO("Built call graph with %zu functions, %zu edges",
-                result->call_graph->node_count,
-                result->call_graph->edge_count);
-    }
-    
-    report_progress(analyzer, "Code structure analyzed", 0.40f);
     
     /* ========== Phase 4: Collect Git Context ========== */
     report_progress(analyzer, "Collecting git history", 0.45f);
     
-    if (repo_path) {
-        /* Collect files involved in trace */
+    if (repo_path && !is_generic_mode && result->trace) {
+        /* Stack trace mode: collect files involved in trace */
         size_t file_count = 0;
         char **files = collect_trace_files(result->trace, repo_path, &file_count);
         
@@ -463,6 +464,13 @@ tm_analysis_result_t *tm_analyze(tm_analyzer_t *analyzer, const char *input)
             }
             TM_FREE(files);
         }
+    } else if (repo_path && is_generic_mode) {
+        /* Generic mode: collect recent commits (no specific files) */
+        result->git_ctx = tm_git_collect_context(
+            repo_path,
+            NULL,
+            0,
+            analyzer->config->max_commits);
     }
     
     if (result->git_ctx) {
@@ -481,14 +489,27 @@ tm_analysis_result_t *tm_analyze(tm_analyzer_t *analyzer, const char *input)
         TM_WARN("No API key configured - skipping LLM analysis");
         result->error_message = tm_strdup("No LLM API key configured");
     } else {
-        /* Generate hypotheses */
-        tm_error_t err = tm_llm_generate_hypotheses(
-            analyzer->llm,
-            result->trace,
-            result->call_graph,
-            result->git_ctx,
-            &result->hypotheses,
-            &result->hypothesis_count);
+        tm_error_t err;
+        
+        if (is_generic_mode) {
+            /* Generic log analysis */
+            TM_INFO("Using generic log analysis mode");
+            err = tm_llm_generate_generic_hypotheses(
+                analyzer->llm,
+                generic_log,
+                result->git_ctx,
+                &result->hypotheses,
+                &result->hypothesis_count);
+        } else {
+            /* Stack trace analysis */
+            err = tm_llm_generate_hypotheses(
+                analyzer->llm,
+                result->trace,
+                result->call_graph,
+                result->git_ctx,
+                &result->hypotheses,
+                &result->hypothesis_count);
+        }
         
         if (err != TM_OK) {
             TM_ERROR("LLM hypothesis generation failed: %s", tm_strerror(err));
@@ -511,7 +532,9 @@ tm_analysis_result_t *tm_analyze(tm_analyzer_t *analyzer, const char *input)
     
     TM_INFO("Analysis completed in %d ms", result->analysis_time_ms);
     
+    /* Cleanup */
     TM_FREE(repo_path);
+    tm_generic_log_free(generic_log);
     
     return result;
 }
@@ -573,4 +596,129 @@ tm_analysis_result_t *tm_analyze_quick(const char *input)
     tm_config_free(config);
     
     return result;
+}
+
+/* ============================================================================
+ * Explain Command — Quick Error Explanation
+ * ========================================================================== */
+
+tm_analysis_result_t *tm_explain(tm_analyzer_t *analyzer, const char *error_msg)
+{
+    if (!analyzer || !error_msg) return NULL;
+    
+    tm_analysis_result_t *result = result_new();
+    gettimeofday(&analyzer->start_time, NULL);
+    
+    report_progress(analyzer, "Explaining error", 0.1f);
+    
+    /* No parsing phase — send the error string directly to LLM */
+    tm_error_t err = tm_llm_explain_error(
+        analyzer->llm,
+        error_msg,
+        &result->hypotheses,
+        &result->hypothesis_count);
+    
+    if (err != TM_OK) {
+        result->error_message = tm_strdup("Failed to generate explanation");
+        TM_ERROR("Explain failed: %s", tm_strerror(err));
+    }
+    
+    report_progress(analyzer, "Done", 1.0f);
+    
+    gettimeofday(&analyzer->end_time, NULL);
+    result->analysis_time_ms =
+        (analyzer->end_time.tv_sec - analyzer->start_time.tv_sec) * 1000 +
+        (analyzer->end_time.tv_usec - analyzer->start_time.tv_usec) / 1000;
+    
+    return result;
+}
+
+/* ============================================================================
+ * Interactive Follow-Up Mode
+ * ========================================================================== */
+
+void tm_interactive(tm_analyzer_t *analyzer, tm_analysis_result_t *result)
+{
+    if (!analyzer || !result) return;
+    
+    bool use_colors = analyzer->config->color_output && isatty(STDOUT_FILENO);
+    
+    fprintf(stdout, "\n");
+    if (use_colors) {
+        fprintf(stdout, "\033[1;36m");
+    }
+    fprintf(stdout, "=== Interactive Mode ===");
+    if (use_colors) {
+        fprintf(stdout, "\033[0m");
+    }
+    fprintf(stdout, "\n");
+    fprintf(stdout, "Ask follow-up questions about the analysis.\n");
+    fprintf(stdout, "Type 'q' to quit, or a number (1-%zu) to drill into a hypothesis.\n\n",
+            result->hypothesis_count);
+    
+    char line[4096];
+    
+    while (1) {
+        if (use_colors) {
+            fprintf(stdout, "\033[1;33m> \033[0m");
+        } else {
+            fprintf(stdout, "> ");
+        }
+        fflush(stdout);
+        
+        if (!fgets(line, sizeof(line), stdin)) {
+            break;  /* EOF */
+        }
+        
+        /* Trim newline */
+        size_t len = strlen(line);
+        if (len > 0 && line[len - 1] == '\n') {
+            line[len - 1] = '\0';
+            len--;
+        }
+        
+        if (len == 0) continue;
+        
+        /* Quit */
+        if (strcmp(line, "q") == 0 || strcmp(line, "quit") == 0 || strcmp(line, "exit") == 0) {
+            break;
+        }
+        
+        /* Number: drill into hypothesis */
+        char *end;
+        long num = strtol(line, &end, 10);
+        if (*end == '\0' && num >= 1 && (size_t)num <= result->hypothesis_count) {
+            const tm_hypothesis_t *h = result->hypotheses[num - 1];
+            fprintf(stdout, "\n");
+            if (h->fix_suggestion) {
+                fprintf(stdout, "  Suggested Fix:\n    %s\n\n", h->fix_suggestion);
+            }
+            if (h->debug_command_count > 0) {
+                fprintf(stdout, "  Debug Commands:\n");
+                for (size_t i = 0; i < h->debug_command_count; i++) {
+                    fprintf(stdout, "    $ %s\n", h->debug_commands[i]);
+                }
+                fprintf(stdout, "\n");
+            }
+            if (h->similar_errors) {
+                fprintf(stdout, "  Similar Errors:\n    %s\n\n", h->similar_errors);
+            }
+            continue;
+        }
+        
+        /* Free-form follow-up question */
+        fprintf(stdout, "Thinking...\n");
+        
+        char *response = NULL;
+        tm_error_t err = tm_llm_followup(analyzer->llm, result, line, &response);
+        
+        if (err == TM_OK && response) {
+            fprintf(stdout, "\n%s\n\n", response);
+            TM_FREE(response);
+        } else {
+            fprintf(stderr, "  (Failed to get response: %s)\n\n", tm_strerror(err));
+        }
+    }
+    
+    fprintf(stdout, "\nExiting interactive mode.\n");
 }

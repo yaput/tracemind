@@ -10,6 +10,11 @@
 #include <time.h>
 
 #ifdef HAVE_LIBGIT2
+
+/* Suppress missing-field-initializer warnings from libgit2's init macros */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmissing-field-initializers"
+
 #include <git2.h>
 
 /* ============================================================================
@@ -771,10 +776,10 @@ void tm_git_context_free(tm_git_context_t *ctx)
     free(ctx);
 }
 
-tm_error_t tm_git_collect_context(const char *repo_path,
-                                  const tm_stack_trace_t *trace,
-                                  int max_commits,
-                                  tm_git_context_t **result)
+static tm_error_t git_collect_context_from_trace(const char *repo_path,
+                                                 const tm_stack_trace_t *trace,
+                                                 int max_commits,
+                                                 tm_git_context_t **result)
 {
     TM_CHECK_NULL(repo_path, TM_ERR_INVALID_ARG);
     TM_CHECK_NULL(trace, TM_ERR_INVALID_ARG);
@@ -850,33 +855,37 @@ tm_error_t tm_git_collect_context(const char *repo_path,
     return TM_OK;
 }
 
-tm_error_t tm_collect_git_context(const char *repo_path,
-                                  const char **files,
-                                  size_t file_count,
-                                  int max_commits,
-                                  tm_git_context_t **ctx)
+tm_git_context_t *tm_git_collect_context(const char *repo_path,
+                                         const char **files,
+                                         size_t file_count,
+                                         int max_commits)
 {
-    TM_CHECK_NULL(ctx, TM_ERR_INVALID_ARG);
-    
     const char *path = repo_path ? repo_path : ".";
     
-    /* Create a minimal trace for the file-based API */
+    /* Create a minimal trace for the internal trace-based API */
     tm_stack_trace_t dummy_trace = {0};
-    dummy_trace.frames = tm_calloc(file_count, sizeof(tm_stack_frame_t));
-    dummy_trace.frame_count = file_count;
-    
-    for (size_t i = 0; i < file_count; i++) {
-        dummy_trace.frames[i].file = tm_strdup(files[i]);
+    if (files && file_count > 0) {
+        dummy_trace.frames = tm_calloc(file_count, sizeof(tm_stack_frame_t));
+        dummy_trace.frame_count = file_count;
+        for (size_t i = 0; i < file_count; i++) {
+            dummy_trace.frames[i].file = tm_strdup(files[i]);
+        }
     }
     
-    tm_error_t err = tm_git_collect_context(path, &dummy_trace, max_commits, ctx);
+    tm_git_context_t *ctx = NULL;
+    tm_error_t err = git_collect_context_from_trace(path, &dummy_trace, max_commits, &ctx);
     
     for (size_t i = 0; i < file_count; i++) {
         TM_FREE(dummy_trace.frames[i].file);
     }
     TM_FREE(dummy_trace.frames);
     
-    return err;
+    if (err != TM_OK) {
+        TM_WARN("Git context collection failed: %s", tm_strerror(err));
+        return NULL;
+    }
+    
+    return ctx;
 }
 
 /* ============================================================================
@@ -942,6 +951,8 @@ tm_error_t tm_git_resolve_sha(const tm_git_repo_t *repo,
     git_oid_tostr(full_sha, 41, &oid);
     return TM_OK;
 }
+
+#pragma GCC diagnostic pop
 
 #else /* !HAVE_LIBGIT2 - Stub implementations */
 

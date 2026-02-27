@@ -194,6 +194,10 @@ typedef struct {
     char *explanation;            /* Detailed explanation (owned) */
     char *evidence;               /* Supporting evidence (owned) */
     char *next_step;              /* Recommended validation step (owned) */
+    char *fix_suggestion;         /* Concrete code fix / patch suggestion (owned, nullable) */
+    char **debug_commands;        /* Shell commands to investigate further (owned) */
+    size_t debug_command_count;
+    char *similar_errors;         /* Common causes for this error pattern (owned, nullable) */
     char **related_files;         /* Related file paths (owned) */
     size_t related_file_count;
     char **related_commits;       /* Related commit SHAs (owned) */
@@ -242,8 +246,18 @@ typedef enum {
     TM_INPUT_AUTO = 0,    /* Auto-detect format */
     TM_INPUT_RAW,         /* Plain text stack trace */
     TM_INPUT_JSON,        /* JSON lines (GCP Log Explorer export) */
-    TM_INPUT_CSV          /* CSV export */
+    TM_INPUT_CSV,         /* CSV export */
+    TM_INPUT_GENERIC      /* Any log format (format-agnostic mode) */
 } tm_input_format_t;
+
+/**
+ * Analysis mode - how to interpret and analyze the input.
+ */
+typedef enum {
+    TM_ANALYSIS_AUTO = 0, /* Auto-detect based on content */
+    TM_ANALYSIS_TRACE,    /* Force stack trace analysis */
+    TM_ANALYSIS_LOG       /* Force generic log analysis (format-agnostic) */
+} tm_analysis_mode_t;
 
 /**
  * TraceMind configuration.
@@ -262,6 +276,7 @@ typedef struct {
     int max_call_depth;       /* Max call graph depth (default: 5) */
     bool include_stdlib;      /* Include stdlib in analysis */
     bool include_tests;       /* Include test files in analysis */
+    tm_analysis_mode_t analysis_mode;  /* Analysis mode hint (auto by default) */
     
     /* Input Settings */
     tm_input_format_t input_format;  /* Input format hint (auto by default) */
@@ -324,6 +339,19 @@ tm_analysis_result_t *tm_analyze(tm_analyzer_t *analyzer, const char *input);
  * Convenience function for one-shot analysis with default config.
  */
 tm_analysis_result_t *tm_analyze_quick(const char *input);
+
+/**
+ * Explain an error message without a full stack trace.
+ * Useful for quick lookups: `tracemind explain "segfault at 0x0"`
+ */
+tm_analysis_result_t *tm_explain(tm_analyzer_t *analyzer, const char *error_msg);
+
+/**
+ * Enter interactive follow-up mode on an existing result.
+ * Lets the user drill into a hypothesis and ask follow-up questions.
+ * Reads from stdin, writes to stdout. Returns when user types 'q' or EOF.
+ */
+void tm_interactive(tm_analyzer_t *analyzer, tm_analysis_result_t *result);
 
 /**
  * Free analyzer instance.

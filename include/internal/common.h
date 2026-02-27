@@ -212,15 +212,35 @@ static inline void tm_strbuf_append_len(tm_strbuf_t *sb, const char *str, size_t
 
 /**
  * Append formatted string to buffer.
+ * Uses two-pass vsnprintf to avoid silent truncation.
  */
 static inline void tm_strbuf_appendf(tm_strbuf_t *sb, const char *fmt, ...)
 {
-    char buf[4096];
-    va_list args;
+    char stack_buf[512];
+    va_list args, args2;
+    
     va_start(args, fmt);
-    vsnprintf(buf, sizeof(buf), fmt, args);
+    va_copy(args2, args);
+    
+    /* First pass: try with stack buffer */
+    int needed = vsnprintf(stack_buf, sizeof(stack_buf), fmt, args);
     va_end(args);
-    tm_strbuf_append(sb, buf);
+    
+    if (needed < 0) {
+        va_end(args2);
+        return;  /* encoding error */
+    }
+    
+    if ((size_t)needed < sizeof(stack_buf)) {
+        tm_strbuf_append(sb, stack_buf);
+    } else {
+        /* Second pass: heap-allocate exact size */
+        char *heap_buf = tm_malloc((size_t)needed + 1);
+        vsnprintf(heap_buf, (size_t)needed + 1, fmt, args2);
+        tm_strbuf_append(sb, heap_buf);
+        TM_FREE(heap_buf);
+    }
+    va_end(args2);
 }
 
 /**

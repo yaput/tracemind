@@ -1,20 +1,11 @@
 /**
  * TraceMind CLI - AI-Powered Root Cause Analysis
- * 
- * Usage:
- *   tracemind analyze <trace_file>
- *   tracemind analyze -              # Read from stdin
- *   cat trace.txt | tracemind analyze
- * 
- * Options:
- *   -p, --provider <name>    LLM provider (openai, anthropic, local)
- *   -m, --model <name>       Model name (e.g., gpt-4o, claude-sonnet-4-20250514)
- *   -o, --output <format>    Output format (cli, markdown, json)
- *   -r, --repo <path>        Repository path
- *   --no-color               Disable colored output
- *   -v, --verbose            Enable verbose output
- *   -h, --help               Show help
- *   --version                Show version
+ *
+ * Simplified usage:
+ *   tracemind crash.log                          # Just give it a file
+ *   tracemind explain "connection refused"        # Explain an error
+ *   python app.py 2>&1 | tracemind               # Pipe from stderr
+ *   tracemind crash.log -i                        # Interactive follow-up
  */
 
 #include "tracemind.h"
@@ -29,50 +20,50 @@
  * Version and Help
  * ========================================================================== */
 
-#define TRACEMIND_VERSION "0.1.0"
+#define TRACEMIND_VERSION "0.2.0"
 
 static const char *HELP_TEXT =
-"TraceMind - AI-Powered Root Cause Analysis\n"
+"TraceMind — AI-powered root cause analysis\n"
 "\n"
 "USAGE:\n"
-"    tracemind analyze <file>         Analyze stack trace from file\n"
-"    tracemind analyze -              Read stack trace from stdin\n"
-"    cat trace.txt | tracemind        Pipe stack trace to analyzer\n"
+"    tracemind <file>                 Analyze a log / stack trace\n"
+"    tracemind explain \"<error>\"      Explain an error message\n"
+"    cat log.txt | tracemind          Pipe logs for analysis\n"
 "\n"
 "COMMANDS:\n"
-"    analyze     Analyze a stack trace and generate hypotheses\n"
+"    (default)   Analyze a file or stdin (no subcommand needed)\n"
+"    analyze     Alias for default — analyze a file\n"
+"    explain     Quick explanation of an error string\n"
 "    config      Show current configuration\n"
-"    version     Show version information\n"
 "\n"
 "OPTIONS:\n"
-"    -p, --provider <name>    LLM provider: openai, anthropic, local\n"
-"    -m, --model <name>       Model name (e.g., gpt-4o, claude-sonnet-4-20250514)\n"
-"    -k, --api-key <key>      API key (or use OPENAI_API_KEY env var)\n"
-"    -o, --output <format>    Output: cli (default), markdown, json\n"
-"    -f, --format <type>      Input format: auto (default), raw, json, csv\n"
-"    -r, --repo <path>        Repository path (auto-detected if omitted)\n"
+"    -i, --interactive        Follow-up mode: drill into hypotheses\n"
+"    -p, --provider <name>    LLM: openai (default), anthropic, local\n"
+"    -m, --model <name>       Model (e.g. gpt-4o, claude-sonnet-4-20250514)\n"
+"    -k, --api-key <key>      API key (or use env var)\n"
+"    -o, --output <format>    Output: cli, markdown, json\n"
+"    -f, --format <type>      Input: auto, raw, json, csv\n"
+"    -r, --repo <path>        Repository path (auto-detected)\n"
 "    -c, --config <file>      Config file path\n"
 "    --no-color               Disable colored output\n"
-"    -v, --verbose            Enable verbose/debug output\n"
-"    -h, --help               Show this help message\n"
+"    -v, --verbose            Verbose / debug output\n"
+"    -h, --help               Show this help\n"
 "    --version                Show version\n"
 "\n"
-"ENVIRONMENT VARIABLES:\n"
-"    OPENAI_API_KEY           OpenAI API key\n"
-"    ANTHROPIC_API_KEY        Anthropic API key  \n"
-"    TRACEMIND_MODEL          Default model name\n"
-"    TRACEMIND_PROVIDER       Default provider\n"
-"    TRACEMIND_DEBUG          Enable debug output (1 or true)\n"
-"\n"
 "EXAMPLES:\n"
-"    tracemind analyze crash.log\n"
-"    python app.py 2>&1 | tracemind analyze -\n"
-"    tracemind analyze trace.txt -o markdown > report.md\n"
-"    tracemind analyze trace.txt --provider anthropic -m claude-sonnet-4-20250514\n"
-"    tracemind analyze gcp_logs.json -f json\n"
-"    tracemind analyze exported_logs.csv -f csv\n"
+"    tracemind crash.log\n"
+"    tracemind crash.log -i                     # interactive follow-up\n"
+"    tracemind explain \"ECONNREFUSED\"           # quick lookup\n"
+"    python app.py 2>&1 | tracemind\n"
+"    tracemind crash.log -o markdown > report.md\n"
+"    kubectl logs pod | tracemind -f json\n"
 "\n"
-"For more information: https://github.com/tracemind/tracemind\n";
+"ENVIRONMENT:\n"
+"    OPENAI_API_KEY / ANTHROPIC_API_KEY    API key\n"
+"    TRACEMIND_MODEL                       Default model\n"
+"    TRACEMIND_PROVIDER                    Default provider\n"
+"\n"
+"https://github.com/tracemind/tracemind\n";
 
 static void print_version(void)
 {
@@ -91,23 +82,24 @@ static void print_help(void)
  * ========================================================================== */
 
 static struct option long_options[] = {
-    {"provider",  required_argument, 0, 'p'},
-    {"model",     required_argument, 0, 'm'},
-    {"api-key",   required_argument, 0, 'k'},
-    {"output",    required_argument, 0, 'o'},
-    {"format",    required_argument, 0, 'f'},
-    {"repo",      required_argument, 0, 'r'},
-    {"config",    required_argument, 0, 'c'},
-    {"no-color",  no_argument,       0, 'n'},
-    {"verbose",   no_argument,       0, 'v'},
-    {"help",      no_argument,       0, 'h'},
-    {"version",   no_argument,       0, 'V'},
+    {"interactive", no_argument,       0, 'i'},
+    {"provider",    required_argument, 0, 'p'},
+    {"model",       required_argument, 0, 'm'},
+    {"api-key",     required_argument, 0, 'k'},
+    {"output",      required_argument, 0, 'o'},
+    {"format",      required_argument, 0, 'f'},
+    {"repo",        required_argument, 0, 'r'},
+    {"config",      required_argument, 0, 'c'},
+    {"no-color",    no_argument,       0, 'n'},
+    {"verbose",     no_argument,       0, 'v'},
+    {"help",        no_argument,       0, 'h'},
+    {"version",     no_argument,       0, 'V'},
     {0, 0, 0, 0}
 };
 
 typedef struct {
-    const char *command;
-    const char *input_file;
+    const char *command;       /* "analyze", "explain", "config", or NULL */
+    const char *input_file;    /* file path, "-", or error string for explain */
     const char *provider;
     const char *model;
     const char *api_key;
@@ -115,11 +107,24 @@ typedef struct {
     const char *input_format;
     const char *repo_path;
     const char *config_path;
+    bool interactive;
     bool no_color;
     bool verbose;
     bool help;
     bool version;
 } cli_args_t;
+
+/**
+ * Check if a positional argument is a known subcommand.
+ */
+static bool is_command(const char *arg)
+{
+    return (strcmp(arg, "analyze") == 0 ||
+            strcmp(arg, "explain") == 0 ||
+            strcmp(arg, "config") == 0 ||
+            strcmp(arg, "version") == 0 ||
+            strcmp(arg, "help") == 0);
+}
 
 static cli_args_t parse_args(int argc, char **argv)
 {
@@ -128,9 +133,10 @@ static cli_args_t parse_args(int argc, char **argv)
     int opt;
     int option_index = 0;
     
-    while ((opt = getopt_long(argc, argv, "p:m:k:o:f:r:c:nvhV", 
+    while ((opt = getopt_long(argc, argv, "ip:m:k:o:f:r:c:nvhV", 
                               long_options, &option_index)) != -1) {
         switch (opt) {
+            case 'i': args.interactive = true; break;
             case 'p': args.provider = optarg; break;
             case 'm': args.model = optarg; break;
             case 'k': args.api_key = optarg; break;
@@ -147,12 +153,24 @@ static cli_args_t parse_args(int argc, char **argv)
         }
     }
     
-    /* Get command and input file */
+    /* Parse positional arguments.
+     * Simplified UX: `tracemind crash.log` works without "analyze".
+     * We detect whether the first positional is a subcommand or a file. */
     if (optind < argc) {
-        args.command = argv[optind++];
+        if (is_command(argv[optind])) {
+            args.command = argv[optind++];
+            if (optind < argc) {
+                args.input_file = argv[optind++];
+            }
+        } else {
+            /* No subcommand — treat as implicit "analyze <file>" */
+            args.command = "analyze";
+            args.input_file = argv[optind++];
+        }
     }
     
-    if (optind < argc) {
+    /* Collect remaining args (for "explain" multi-word strings) */
+    if (optind < argc && !args.input_file) {
         args.input_file = argv[optind++];
     }
     
@@ -367,6 +385,11 @@ static int cmd_analyze(cli_args_t *args)
     /* Output results */
     tm_print_result(analyzer, result);
     
+    /* Interactive follow-up mode */
+    if (args->interactive && result->hypothesis_count > 0) {
+        tm_interactive(analyzer, result);
+    }
+    
     /* Exit status based on result */
     int exit_code = 0;
     if (result->hypothesis_count == 0) {
@@ -382,6 +405,71 @@ static int cmd_analyze(cli_args_t *args)
     tm_config_free(config);
     
     return exit_code;
+}
+
+/* ============================================================================
+ * Explain Command
+ * ========================================================================== */
+
+static int cmd_explain(cli_args_t *args)
+{
+    if (!args->input_file) {
+        fprintf(stderr, "Usage: tracemind explain \"<error message>\"\n");
+        return 1;
+    }
+    
+    /* Create and configure */
+    tm_config_t *config = tm_config_new();
+    tm_config_load(config, args->config_path);
+    tm_config_load_env(config);
+    
+    /* Apply CLI overrides */
+    if (args->provider) {
+        if (strcasecmp(args->provider, "openai") == 0) config->llm_provider = TM_LLM_OPENAI;
+        else if (strcasecmp(args->provider, "anthropic") == 0) config->llm_provider = TM_LLM_ANTHROPIC;
+        else if (strcasecmp(args->provider, "local") == 0) config->llm_provider = TM_LLM_LOCAL;
+    }
+    if (args->model) { TM_FREE(config->model_name); config->model_name = tm_strdup(args->model); }
+    if (args->api_key) { TM_FREE(config->api_key); config->api_key = tm_strdup(args->api_key); }
+    if (args->no_color) config->color_output = false;
+    if (args->verbose) { config->verbose = true; g_log_level = TM_LOG_DEBUG; }
+    
+    if (!config->api_key || strlen(config->api_key) == 0) {
+        fprintf(stderr, "Error: No API key configured.\n");
+        fprintf(stderr, "Set OPENAI_API_KEY or ANTHROPIC_API_KEY, or use --api-key.\n");
+        tm_config_free(config);
+        return 1;
+    }
+    
+    tm_analyzer_t *analyzer = tm_analyzer_new(config);
+    if (!analyzer) {
+        fprintf(stderr, "Error: Failed to initialize analyzer.\n");
+        tm_config_free(config);
+        return 1;
+    }
+    
+    g_tty_output = isatty(STDERR_FILENO);
+    tm_analyzer_set_progress_callback(analyzer, progress_callback, NULL);
+    
+    tm_analysis_result_t *result = tm_explain(analyzer, args->input_file);
+    
+    if (!result) {
+        fprintf(stderr, "Error: Explain failed.\n");
+        tm_analyzer_free(analyzer);
+        tm_config_free(config);
+        return 1;
+    }
+    
+    tm_print_result(analyzer, result);
+    
+    if (args->interactive && result->hypothesis_count > 0) {
+        tm_interactive(analyzer, result);
+    }
+    
+    tm_result_free(result);
+    tm_analyzer_free(analyzer);
+    tm_config_free(config);
+    return 0;
 }
 
 static int cmd_config(cli_args_t *args)
@@ -447,7 +535,7 @@ int main(int argc, char **argv)
     
     /* Handle commands */
     if (!args.command) {
-        /* No command - check if data on stdin */
+        /* No command — check if data on stdin */
         if (!isatty(STDIN_FILENO)) {
             args.command = "analyze";
             args.input_file = "-";
@@ -459,6 +547,10 @@ int main(int argc, char **argv)
     
     if (strcmp(args.command, "analyze") == 0) {
         return cmd_analyze(&args);
+    }
+    
+    if (strcmp(args.command, "explain") == 0) {
+        return cmd_explain(&args);
     }
     
     if (strcmp(args.command, "config") == 0) {
@@ -476,6 +568,6 @@ int main(int argc, char **argv)
     }
     
     fprintf(stderr, "Unknown command: %s\n", args.command);
-    fprintf(stderr, "Run 'tracemind help' for usage.\n");
+    fprintf(stderr, "Try: tracemind --help\n");
     return 1;
 }

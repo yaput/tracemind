@@ -380,6 +380,47 @@ void tm_cli_hypothesis(const tm_formatter_t *fmt, const tm_hypothesis_t *hyp)
         fprintf(fmt->output, "\n");
     }
     
+    /* Fix suggestion */
+    if (hyp->fix_suggestion) {
+        print_colored(fmt, TM_COLOR_BOLD, "  Suggested Fix:\n");
+        if (fmt->use_colors) {
+            fprintf(fmt->output, "    %s%s%s\n",
+                    TM_COLOR_GREEN, hyp->fix_suggestion, TM_COLOR_RESET);
+        } else {
+            fprintf(fmt->output, "    %s\n", hyp->fix_suggestion);
+        }
+        fprintf(fmt->output, "\n");
+    }
+    
+    /* Debug commands */
+    if (hyp->debug_command_count > 0) {
+        print_colored(fmt, TM_COLOR_BOLD, "  Debug Commands:\n");
+        for (size_t i = 0; i < hyp->debug_command_count; i++) {
+            if (hyp->debug_commands[i]) {
+                if (fmt->use_colors) {
+                    fprintf(fmt->output, "    %s$ %s%s\n",
+                            TM_COLOR_CYAN, hyp->debug_commands[i], TM_COLOR_RESET);
+                } else {
+                    fprintf(fmt->output, "    $ %s\n", hyp->debug_commands[i]);
+                }
+            }
+        }
+        fprintf(fmt->output, "\n");
+    }
+    
+    /* Similar errors */
+    if (hyp->similar_errors) {
+        print_colored(fmt, TM_COLOR_BOLD, "  Similar Errors:\n");
+        char *wrapped = tm_wrap_text(hyp->similar_errors, fmt->terminal_width - 6);
+        char *line = strtok(wrapped, "\n");
+        while (line) {
+            fprintf(fmt->output, "    %s\n", line);
+            line = strtok(NULL, "\n");
+        }
+        TM_FREE(wrapped);
+        fprintf(fmt->output, "\n");
+    }
+    
     /* Related files */
     if (hyp->related_file_count > 0) {
         print_colored(fmt, TM_COLOR_DIM, "  Related files: ");
@@ -657,6 +698,28 @@ void tm_md_hypothesis(tm_strbuf_t *sb, const tm_hypothesis_t *hyp)
         tm_strbuf_append(sb, "\n\n");
     }
     
+    if (hyp->fix_suggestion) {
+        tm_strbuf_append(sb, "**Suggested Fix:**\n```\n");
+        tm_strbuf_append(sb, hyp->fix_suggestion);
+        tm_strbuf_append(sb, "\n```\n\n");
+    }
+    
+    if (hyp->debug_command_count > 0) {
+        tm_strbuf_append(sb, "**Debug Commands:**\n```sh\n");
+        for (size_t i = 0; i < hyp->debug_command_count; i++) {
+            if (hyp->debug_commands[i]) {
+                tm_strbuf_appendf(sb, "$ %s\n", hyp->debug_commands[i]);
+            }
+        }
+        tm_strbuf_append(sb, "```\n\n");
+    }
+    
+    if (hyp->similar_errors) {
+        tm_strbuf_append(sb, "**Similar Errors:**\n");
+        tm_strbuf_append(sb, hyp->similar_errors);
+        tm_strbuf_append(sb, "\n\n");
+    }
+    
     if (hyp->related_file_count > 0) {
         tm_strbuf_append(sb, "**Related Files:** ");
         for (size_t i = 0; i < hyp->related_file_count; i++) {
@@ -775,6 +838,14 @@ char *tm_json_hypothesis(const tm_hypothesis_t *hyp)
     json_object_set_new(obj, "explanation", json_string(hyp->explanation ? hyp->explanation : ""));
     json_object_set_new(obj, "evidence", json_string(hyp->evidence ? hyp->evidence : ""));
     json_object_set_new(obj, "next_step", json_string(hyp->next_step ? hyp->next_step : ""));
+    json_object_set_new(obj, "fix_suggestion", json_string(hyp->fix_suggestion ? hyp->fix_suggestion : ""));
+    json_object_set_new(obj, "similar_errors", json_string(hyp->similar_errors ? hyp->similar_errors : ""));
+    
+    json_t *debug_cmds = json_array();
+    for (size_t i = 0; i < hyp->debug_command_count; i++) {
+        json_array_append_new(debug_cmds, json_string(hyp->debug_commands[i] ? hyp->debug_commands[i] : ""));
+    }
+    json_object_set_new(obj, "debug_commands", debug_cmds);
     
     json_t *files = json_array();
     for (size_t i = 0; i < hyp->related_file_count; i++) {

@@ -33,7 +33,10 @@ const char *TM_HYPOTHESIS_SCHEMA =
     "          \"title\": {\"type\": \"string\"},\n"
     "          \"explanation\": {\"type\": \"string\"},\n"
     "          \"evidence\": {\"type\": \"string\"},\n"
-    "          \"next_step\": {\"type\": \"string\"}\n"
+    "          \"next_step\": {\"type\": \"string\"},\n"
+    "          \"fix_suggestion\": {\"type\": \"string\"},\n"
+    "          \"debug_commands\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}},\n"
+    "          \"similar_errors\": {\"type\": \"string\"}\n"
     "        }\n"
     "      }\n"
     "    }\n"
@@ -136,15 +139,17 @@ char *tm_build_system_prompt(void)
     return tm_strdup(
         "You are TraceMind, an expert backend debugging assistant. Your role is to analyze "
         "stack traces, code context, and git history to identify the most probable root causes "
-        "of errors.\n\n"
+        "of errors and provide actionable fixes.\n\n"
         
         "CRITICAL RULES:\n"
         "1. Output EXACTLY 3 hypotheses, ranked by probability\n"
         "2. Each hypothesis must have a confidence percentage (0-100)\n"
-        "3. Be specific - reference actual file names, line numbers, and function names\n"
+        "3. Be specific — reference actual file names, line numbers, and function names\n"
         "4. Focus on the most recent code changes when relevant\n"
         "5. Consider configuration and schema changes as high-priority suspects\n"
-        "6. Provide actionable 'Next Step' validation suggestions\n\n"
+        "6. ALWAYS provide a concrete fix_suggestion with code/config changes\n"
+        "7. ALWAYS provide debug_commands — shell commands to investigate further\n"
+        "8. ALWAYS provide similar_errors — common causes for this error pattern\n\n"
         
         "OUTPUT FORMAT (JSON):\n"
         "{\n"
@@ -155,12 +160,29 @@ char *tm_build_system_prompt(void)
         "      \"title\": \"Short descriptive title\",\n"
         "      \"explanation\": \"Detailed explanation of why this might be the cause\",\n"
         "      \"evidence\": \"Specific evidence from the trace/code/git history\",\n"
-        "      \"next_step\": \"Specific action to validate or fix this hypothesis\",\n"
+        "      \"next_step\": \"Specific action to validate this hypothesis\",\n"
+        "      \"fix_suggestion\": \"Concrete code change or config fix. Include file:line and a diff/patch snippet if possible.\",\n"
+        "      \"debug_commands\": [\"git log --oneline -5 -- path/to/file.py\", "
+                                    "\"grep -n 'pattern' file.py\", "
+                                    "\"curl -v http://localhost:8080/health\"],\n"
+        "      \"similar_errors\": \"This error commonly occurs when X. Other causes include Y and Z.\",\n"
         "      \"related_files\": [\"file1.py\", \"file2.py\"],\n"
         "      \"related_commits\": [\"abc123\"]\n"
         "    }\n"
         "  ]\n"
         "}\n\n"
+        
+        "FIX SUGGESTION GUIDELINES:\n"
+        "- Include the exact file and line to change\n"
+        "- Show a before/after code diff when possible\n"
+        "- If the fix is a config change, show the exact config key and value\n"
+        "- If the fix requires a migration, outline the steps\n\n"
+        
+        "DEBUG COMMANDS GUIDELINES:\n"
+        "- Provide 2-4 shell commands the user can run immediately\n"
+        "- Include commands to verify the hypothesis (grep, git log, curl, etc.)\n"
+        "- Include commands to check system state (ps, netstat, df, etc.)\n"
+        "- Prefer standard POSIX tools\n\n"
         
         "ANALYSIS PRIORITIES:\n"
         "1. Exact error location and type\n"
@@ -284,6 +306,184 @@ char *tm_build_analysis_prompt(const tm_analysis_context_t *ctx)
     tm_strbuf_append(&sb, "---\n\n");
     tm_strbuf_append(&sb, "Analyze the above information and provide your root cause hypotheses "
                           "in the specified JSON format.");
+    
+    return tm_strbuf_finish(&sb);
+}
+
+/* ============================================================================
+ * Generic Log Analysis Prompts (Format-Agnostic)
+ * ========================================================================== */
+
+char *tm_build_generic_system_prompt(tm_log_format_t format)
+{
+    const char *format_name = tm_log_format_name(format);
+    
+    tm_strbuf_t sb;
+    tm_strbuf_init(&sb);
+    
+    tm_strbuf_append(&sb,
+        "You are TraceMind, an expert log analysis assistant. Your role is to analyze "
+        "logs of any format to identify errors, anomalies, and root causes.\n\n"
+        
+        "DETECTED LOG FORMAT: ");
+    tm_strbuf_append(&sb, format_name);
+    tm_strbuf_append(&sb, "\n\n"
+        
+        "ANALYSIS MODES:\n"
+        "1. ERROR DIAGNOSIS - Identify root cause of errors/failures\n"
+        "2. ANOMALY DETECTION - Identify unusual patterns or behaviors\n"
+        "3. CORRELATION - Link related events across log entries\n"
+        "4. PERFORMANCE - Identify latency issues, resource problems\n\n"
+        
+        "CRITICAL RULES:\n"
+        "1. Output EXACTLY 3 hypotheses (or findings), ranked by probability/impact\n"
+        "2. Each must have a confidence percentage (0-100)\n"
+        "3. Be specific - reference actual log entries, timestamps, and patterns\n"
+        "4. Identify patterns across multiple entries when relevant\n"
+        "5. Consider timing correlations and cascading failures\n"
+        "6. Provide actionable 'Next Step' investigation suggestions\n\n"
+        
+        "OUTPUT FORMAT (JSON):\n"
+        "{\n"
+        "  \"analysis_type\": \"error_diagnosis|anomaly|correlation|performance\",\n"
+        "  \"hypotheses\": [\n"
+        "    {\n"
+        "      \"rank\": 1,\n"
+        "      \"confidence\": 85,\n"
+        "      \"title\": \"Short descriptive title\",\n"
+        "      \"explanation\": \"Detailed explanation of the finding\",\n"
+        "      \"evidence\": \"Specific log entries/patterns that support this\",\n"
+        "      \"next_step\": \"Specific action to investigate or fix\",\n"
+        "      \"related_entries\": [1, 5, 12]\n"
+        "    }\n"
+        "  ]\n"
+        "}\n\n"
+        
+        "ANALYSIS PRIORITIES:\n"
+        "1. Error messages and their immediate context\n"
+        "2. Timing patterns (rapid succession, periodic failures)\n"
+        "3. Resource indicators (memory, connections, timeouts)\n"
+        "4. Service dependencies and cascading effects\n"
+        "5. Configuration or deployment indicators"
+    );
+    
+    return tm_strbuf_finish(&sb);
+}
+
+char *tm_build_generic_log_prompt(const tm_generic_analysis_ctx_t *ctx)
+{
+    if (!ctx || !ctx->log) return NULL;
+    
+    const tm_generic_log_t *log = ctx->log;
+    
+    tm_strbuf_t sb;
+    tm_strbuf_init(&sb);
+    
+    /* Log summary section */
+    tm_strbuf_append(&sb, "## LOG SUMMARY\n\n");
+    tm_strbuf_appendf(&sb, "**Format:** %s\n", 
+                      log->format_description ? log->format_description : "unknown");
+    tm_strbuf_appendf(&sb, "**Total Entries:** %zu\n", log->count);
+    tm_strbuf_appendf(&sb, "**Errors:** %zu\n", log->total_errors);
+    tm_strbuf_appendf(&sb, "**Warnings:** %zu\n", log->total_warnings);
+    
+    if (log->time_range_start && log->time_range_end) {
+        tm_strbuf_appendf(&sb, "**Time Range:** %s to %s\n",
+                          log->time_range_start, log->time_range_end);
+    }
+    tm_strbuf_append(&sb, "\n");
+    
+    /* Log entries section */
+    tm_strbuf_append(&sb, "## LOG ENTRIES\n\n");
+    
+    size_t max_entries = ctx->max_entries > 0 ? ctx->max_entries : 100;
+    size_t shown = 0;
+    
+    for (size_t i = 0; i < log->count && shown < max_entries; i++) {
+        const tm_generic_log_entry_t *e = &log->entries[i];
+        
+        /* Filter to errors only if requested */
+        if (ctx->errors_only && !e->is_error && !e->is_anomaly) {
+            continue;
+        }
+        
+        tm_strbuf_appendf(&sb, "**[%zu]**", e->line_number);
+        
+        if (e->timestamp) {
+            tm_strbuf_appendf(&sb, " `%s`", e->timestamp);
+        }
+        if (e->severity) {
+            tm_strbuf_appendf(&sb, " **%s**", e->severity);
+        }
+        if (e->source) {
+            tm_strbuf_appendf(&sb, " (%s)", e->source);
+        }
+        
+        /* Relevance indicator */
+        if (e->is_error) {
+            tm_strbuf_append(&sb, " [ERROR]");
+        } else if (e->is_anomaly) {
+            tm_strbuf_append(&sb, " [ANOMALY]");
+        }
+        
+        tm_strbuf_append(&sb, "\n");
+        
+        /* Message or raw line */
+        if (ctx->include_raw_lines && e->raw_line) {
+            tm_strbuf_append(&sb, "```\n");
+            tm_strbuf_append(&sb, e->raw_line);
+            tm_strbuf_append(&sb, "\n```\n");
+        } else if (e->message) {
+            tm_strbuf_append(&sb, e->message);
+            tm_strbuf_append(&sb, "\n");
+        }
+        
+        tm_strbuf_append(&sb, "\n");
+        shown++;
+    }
+    
+    if (shown < log->count) {
+        tm_strbuf_appendf(&sb, "*(... %zu more entries omitted)*\n\n", 
+                          log->count - shown);
+    }
+    
+    /* Git context if available */
+    if (ctx->git_ctx && ctx->git_ctx->commit_count > 0) {
+        tm_strbuf_append(&sb, "## RECENT CHANGES\n\n");
+        tm_strbuf_appendf(&sb, "**Branch:** %s\n\n",
+                          ctx->git_ctx->current_branch ? ctx->git_ctx->current_branch : "unknown");
+        
+        tm_strbuf_append(&sb, "**Recent commits:**\n");
+        for (size_t i = 0; i < ctx->git_ctx->commit_count && i < 5; i++) {
+            const tm_git_commit_t *c = &ctx->git_ctx->commits[i];
+            const char *msg = c->message;
+            const char *nl = msg ? strchr(msg, '\n') : NULL;
+            size_t msg_len = nl ? (size_t)(nl - msg) : (msg ? strlen(msg) : 0);
+            if (msg_len > 60) msg_len = 60;
+            
+            tm_strbuf_appendf(&sb, "- `%.7s` ", c->sha);
+            if (msg && msg_len > 0) {
+                char *truncated = tm_strndup(msg, msg_len);
+                tm_strbuf_append(&sb, truncated);
+                TM_FREE(truncated);
+            }
+            if (c->touches_config) tm_strbuf_append(&sb, " **[CONFIG]**");
+            tm_strbuf_append(&sb, "\n");
+        }
+        tm_strbuf_append(&sb, "\n");
+    }
+    
+    /* Additional context */
+    if (ctx->additional_context) {
+        tm_strbuf_append(&sb, "## ADDITIONAL CONTEXT\n\n");
+        tm_strbuf_append(&sb, ctx->additional_context);
+        tm_strbuf_append(&sb, "\n\n");
+    }
+    
+    tm_strbuf_append(&sb, "---\n\n");
+    tm_strbuf_append(&sb, "Analyze the above log entries and provide your findings/hypotheses "
+                          "in the specified JSON format. Focus on identifying the root cause of "
+                          "any errors and notable patterns.");
     
     return tm_strbuf_finish(&sb);
 }
@@ -732,6 +932,13 @@ void tm_hypothesis_free(tm_hypothesis_t *h)
     TM_FREE(h->explanation);
     TM_FREE(h->evidence);
     TM_FREE(h->next_step);
+    TM_FREE(h->fix_suggestion);
+    TM_FREE(h->similar_errors);
+    
+    for (size_t j = 0; j < h->debug_command_count; j++) {
+        TM_FREE(h->debug_commands[j]);
+    }
+    TM_FREE(h->debug_commands);
     
     for (size_t j = 0; j < h->related_file_count; j++) {
         TM_FREE(h->related_files[j]);
@@ -804,6 +1011,27 @@ tm_error_t tm_parse_hypotheses(const char *response_text,
         
         val = json_object_get(hyp, "next_step");
         h->next_step = val && json_is_string(val) ? tm_strdup(json_string_value(val)) : NULL;
+        
+        /* Fix suggestion */
+        val = json_object_get(hyp, "fix_suggestion");
+        h->fix_suggestion = val && json_is_string(val) ? tm_strdup(json_string_value(val)) : NULL;
+        
+        /* Debug commands */
+        val = json_object_get(hyp, "debug_commands");
+        if (val && json_is_array(val)) {
+            h->debug_command_count = json_array_size(val);
+            if (h->debug_command_count > 0) {
+                h->debug_commands = tm_malloc(h->debug_command_count * sizeof(char *));
+                for (size_t j = 0; j < h->debug_command_count; j++) {
+                    json_t *cmd = json_array_get(val, j);
+                    h->debug_commands[j] = json_is_string(cmd) ? tm_strdup(json_string_value(cmd)) : NULL;
+                }
+            }
+        }
+        
+        /* Similar errors */
+        val = json_object_get(hyp, "similar_errors");
+        h->similar_errors = val && json_is_string(val) ? tm_strdup(json_string_value(val)) : NULL;
         
         /* Related files */
         val = json_object_get(hyp, "related_files");
@@ -930,6 +1158,88 @@ tm_error_t tm_llm_generate_hypotheses(tm_llm_client_t *client,
 }
 
 /* ============================================================================
+ * Generic Log Hypothesis Generation (Format-Agnostic)
+ * ========================================================================== */
+
+tm_error_t tm_llm_generate_generic_hypotheses(tm_llm_client_t *client,
+                                              const tm_generic_log_t *log,
+                                              const tm_git_context_t *git_ctx,
+                                              tm_hypothesis_t ***hypotheses,
+                                              size_t *count)
+{
+    TM_CHECK_NULL(client, TM_ERR_INVALID_ARG);
+    TM_CHECK_NULL(log, TM_ERR_INVALID_ARG);
+    TM_CHECK_NULL(hypotheses, TM_ERR_INVALID_ARG);
+    TM_CHECK_NULL(count, TM_ERR_INVALID_ARG);
+    
+    *hypotheses = NULL;
+    *count = 0;
+    
+    /* Build generic analysis context */
+    tm_generic_analysis_ctx_t ctx = {
+        .log = log,
+        .git_ctx = git_ctx,
+        .additional_context = NULL,
+        .max_entries = 50,                /* Limit entries to control token usage */
+        .include_raw_lines = true,        /* Include raw lines for context */
+        .errors_only = (log->total_errors > 0)  /* Focus on errors if present */
+    };
+    
+    /* Build format-aware prompts */
+    char *system_prompt = tm_build_generic_system_prompt(log->detected_format);
+    char *user_prompt = tm_build_generic_log_prompt(&ctx);
+    
+    if (!system_prompt || !user_prompt) {
+        TM_FREE(system_prompt);
+        TM_FREE(user_prompt);
+        return TM_ERR_NOMEM;
+    }
+    
+    TM_DEBUG("Generic log prompt: %d estimated tokens", tm_estimate_tokens(user_prompt));
+    
+    /* Build chat request */
+    tm_chat_message_t messages[2] = {
+        { .role = TM_ROLE_SYSTEM, .content = system_prompt },
+        { .role = TM_ROLE_USER, .content = user_prompt }
+    };
+    
+    tm_chat_request_t request = {
+        .messages = messages,
+        .message_count = 2,
+        .max_tokens = DEFAULT_MAX_TOKENS,
+        .temperature = client->temperature
+    };
+    
+    /* Send request with retry */
+    tm_retry_config_t retry_cfg = tm_default_retry_config();
+    tm_chat_response_t *response = NULL;
+    
+    tm_error_t err = tm_llm_chat_with_retry(client, &request, &retry_cfg, &response);
+    
+    TM_FREE(system_prompt);
+    TM_FREE(user_prompt);
+    
+    if (err != TM_OK) {
+        TM_ERROR("LLM request failed for generic log: %s", tm_strerror(err));
+        return err;
+    }
+    
+    if (!response || !response->content) {
+        tm_chat_response_free(response);
+        return TM_ERR_LLM;
+    }
+    
+    TM_INFO("Generic log analysis: %d tokens", response->completion_tokens);
+    
+    /* Parse hypotheses from response */
+    err = tm_parse_hypotheses(response->content, hypotheses, count);
+    
+    tm_chat_response_free(response);
+    
+    return err;
+}
+
+/* ============================================================================
  * Token Estimation
  * ========================================================================== */
 
@@ -975,4 +1285,163 @@ bool tm_validate_hypothesis_json(const char *json_str)
     json_decref(root);
     
     return valid;
+}
+
+/* ============================================================================
+ * Explain Error (freeform, no trace parsing)
+ * ========================================================================== */
+
+tm_error_t tm_llm_explain_error(tm_llm_client_t *client,
+                                const char *error_msg,
+                                tm_hypothesis_t ***hypotheses,
+                                size_t *count)
+{
+    TM_CHECK_NULL(client, TM_ERR_INVALID_ARG);
+    TM_CHECK_NULL(error_msg, TM_ERR_INVALID_ARG);
+    TM_CHECK_NULL(hypotheses, TM_ERR_INVALID_ARG);
+    TM_CHECK_NULL(count, TM_ERR_INVALID_ARG);
+    
+    *hypotheses = NULL;
+    *count = 0;
+    
+    char *system_prompt = tm_build_system_prompt();
+    if (!system_prompt) return TM_ERR_NOMEM;
+    
+    /* Build a concise user prompt for freeform error text */
+    size_t msg_len = strlen(error_msg);
+    size_t prompt_sz = msg_len + 512;
+    char *user_prompt = tm_malloc(prompt_sz);
+    if (!user_prompt) {
+        TM_FREE(system_prompt);
+        return TM_ERR_NOMEM;
+    }
+    
+    snprintf(user_prompt, prompt_sz,
+        "Analyze the following error message or log snippet and generate "
+        "root cause hypotheses with fix suggestions and debug commands.\n\n"
+        "Error:\n```\n%s\n```\n\n"
+        "Respond with JSON matching the schema in your system prompt.",
+        error_msg);
+    
+    tm_chat_message_t messages[2] = {
+        { .role = TM_ROLE_SYSTEM, .content = system_prompt },
+        { .role = TM_ROLE_USER,   .content = user_prompt }
+    };
+    
+    tm_chat_request_t request = {
+        .messages = messages,
+        .message_count = 2,
+        .max_tokens = DEFAULT_MAX_TOKENS,
+        .temperature = client->temperature
+    };
+    
+    tm_retry_config_t retry_cfg = tm_default_retry_config();
+    tm_chat_response_t *response = NULL;
+    
+    tm_error_t err = tm_llm_chat_with_retry(client, &request, &retry_cfg, &response);
+    
+    TM_FREE(system_prompt);
+    TM_FREE(user_prompt);
+    
+    if (err != TM_OK) {
+        TM_ERROR("LLM explain request failed: %s", tm_strerror(err));
+        return err;
+    }
+    
+    if (!response || !response->content) {
+        tm_chat_response_free(response);
+        return TM_ERR_LLM;
+    }
+    
+    err = tm_parse_hypotheses(response->content, hypotheses, count);
+    tm_chat_response_free(response);
+    
+    return err;
+}
+
+/* ============================================================================
+ * Follow-Up Question (interactive mode)
+ * ========================================================================== */
+
+tm_error_t tm_llm_followup(tm_llm_client_t *client,
+                           const tm_analysis_result_t *result,
+                           const char *question,
+                           char **response_out)
+{
+    TM_CHECK_NULL(client, TM_ERR_INVALID_ARG);
+    TM_CHECK_NULL(question, TM_ERR_INVALID_ARG);
+    TM_CHECK_NULL(response_out, TM_ERR_INVALID_ARG);
+    
+    *response_out = NULL;
+    
+    /* Build context summary from prior analysis */
+    tm_strbuf_t ctx;
+    tm_strbuf_init(&ctx);
+    
+    tm_strbuf_append(&ctx, "You previously analyzed an error and produced these hypotheses:\n\n");
+    
+    if (result && result->hypotheses) {
+        for (size_t i = 0; i < result->hypothesis_count; i++) {
+            const tm_hypothesis_t *h = result->hypotheses[i];
+            if (h && h->title) {
+                tm_strbuf_appendf(&ctx, "%zu. [%d%%] %s\n", i + 1,
+                                  h->confidence, h->title);
+                if (h->explanation)
+                    tm_strbuf_appendf(&ctx, "   %s\n", h->explanation);
+            }
+        }
+    }
+    
+    tm_strbuf_appendf(&ctx, "\nUser follow-up question:\n%s\n\n"
+                             "Answer concisely. If the question asks for commands, "
+                             "provide copy-pasteable shell commands. "
+                             "If it asks about root cause, be specific about code paths.",
+                             question);
+    
+    char *context_str = tm_strbuf_finish(&ctx);
+    if (!context_str) return TM_ERR_NOMEM;
+    
+    char *system_prompt = tm_strdup(
+        "You are a debugging assistant. You previously analyzed an error. "
+        "Now answer a follow-up question. Be direct and actionable.");
+    
+    if (!system_prompt) {
+        TM_FREE(context_str);
+        return TM_ERR_NOMEM;
+    }
+    
+    tm_chat_message_t messages[2] = {
+        { .role = TM_ROLE_SYSTEM, .content = system_prompt },
+        { .role = TM_ROLE_USER,   .content = context_str }
+    };
+    
+    tm_chat_request_t request = {
+        .messages = messages,
+        .message_count = 2,
+        .max_tokens = DEFAULT_MAX_TOKENS,
+        .temperature = client->temperature
+    };
+    
+    tm_retry_config_t retry_cfg = tm_default_retry_config();
+    tm_chat_response_t *response = NULL;
+    
+    tm_error_t err = tm_llm_chat_with_retry(client, &request, &retry_cfg, &response);
+    
+    TM_FREE(system_prompt);
+    TM_FREE(context_str);
+    
+    if (err != TM_OK) {
+        TM_ERROR("LLM follow-up request failed: %s", tm_strerror(err));
+        return err;
+    }
+    
+    if (!response || !response->content) {
+        tm_chat_response_free(response);
+        return TM_ERR_LLM;
+    }
+    
+    *response_out = tm_strdup(response->content);
+    tm_chat_response_free(response);
+    
+    return *response_out ? TM_OK : TM_ERR_NOMEM;
 }

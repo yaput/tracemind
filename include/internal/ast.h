@@ -89,7 +89,7 @@ typedef struct {
  * Extract all function definitions from a source file.
  */
 tm_error_t tm_extract_functions(const tm_source_file_t *file,
-                                tm_function_def_t ***funcs,
+                                tm_function_def_t **funcs,
                                 size_t *count);
 
 /**
@@ -130,7 +130,7 @@ typedef struct {
  */
 tm_error_t tm_extract_call_sites(const tm_source_file_t *file,
                                  const tm_function_def_t *func,
-                                 tm_call_site_t ***sites,
+                                 tm_call_site_t **sites,
                                  size_t *count);
 
 /**
